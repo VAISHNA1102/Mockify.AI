@@ -120,6 +120,7 @@ export function TestHistory() {
           time_limit,
           created_at,
           test_questions (
+            id,
             question_number,
             question_text,
             options,
@@ -177,6 +178,7 @@ export function TestHistory() {
             exam_type: examTypeFromTitle,
             topic: test.topic || 'General',
             questions: (test.test_questions || []).map((q: any) => ({
+              id: q.id,
               question: q.question_text,
               options: q.options,
               correctAnswer: q.correct_answer,
@@ -204,6 +206,7 @@ export function TestHistory() {
             exam_type: examTypeFromTitle,
             topic: test.topic || 'General',
             questions: (test.test_questions || []).map((q: any) => ({
+              id: q.id,
               question: q.question_text,
               options: q.options,
               correctAnswer: q.correct_answer,

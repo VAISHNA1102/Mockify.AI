@@ -62,7 +62,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { 
           error: 'Search temporarily unavailable',
-          details: 'HuggingFace API error. Please check your API key.'
+          details: 'Local embedding generation failed. Please try again after the model is available.'
         },
         { status: 503 }
       );
@@ -230,10 +230,10 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Check if user has any materials with embeddings
-    const { data: materials, error } = await supabase
-      .from('study_materials')
-      .select('id')
+    // Search uses chunk-level vectors, so report availability from that table.
+    const { data: chunks, error } = await supabase
+      .from('document_chunks')
+      .select('material_id')
       .eq('user_id', user.id)
       .not('embedding', 'is', null)
       .limit(1);
@@ -242,10 +242,12 @@ export async function GET(request: NextRequest) {
       throw error;
     }
 
+    const materialsWithEmbeddings = chunks?.length ? 1 : 0;
+
     return NextResponse.json({
       available: true,
-      materialsWithEmbeddings: materials?.length || 0,
-      message: materials && materials.length > 0 
+      materialsWithEmbeddings,
+      message: materialsWithEmbeddings > 0
         ? 'Semantic search is ready'
         : 'No materials with embeddings yet. Upload materials to enable search.'
     });

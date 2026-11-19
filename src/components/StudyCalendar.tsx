@@ -1,6 +1,8 @@
+"use client";
+
 import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ChevronLeft, ChevronRight, CheckCircle2, Calendar as CalendarIcon, Clock } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Calendar as CalendarIcon, CheckCircle2, Clock } from 'lucide-react';
 import { Button } from './ui/button';
 import { createClient } from '@/lib/supabase';
 
@@ -18,6 +20,7 @@ interface CalendarDay {
   studyMinutes?: number;
   scheduledCount?: number;
   isToday?: boolean;
+  dateStr: string;
 }
 
 interface DayData {
@@ -46,48 +49,65 @@ export function StudyCalendar() {
         const firstDay = new Date(year, month, 1);
         const lastDay = new Date(year, month + 1, 0);
 
-        // Format dates for SQL
         const startDate = firstDay.toISOString().split('T')[0];
         const endDate = lastDay.toISOString().split('T')[0];
 
-        // Fetch scheduled tests for the month
-        const { data: scheduledTests } = await supabase
-          .from('scheduled_tests')
-          .select('scheduled_date')
-          .eq('user_id', user.id)
-          .gte('scheduled_date', startDate)
-          .lte('scheduled_date', endDate);
+        // Fetch scheduled tests safely
+        let scheduledTests: any[] = [];
+        try {
+          const { data } = await supabase
+            .from('scheduled_tests')
+            .select('scheduled_date')
+            .eq('user_id', user.id)
+            .gte('scheduled_date', startDate)
+            .lte('scheduled_date', endDate);
+          if (data) scheduledTests = data;
+        } catch {
+          // scheduled_tests table might not exist
+        }
 
-        // Fetch completed tests for the month
+        // Fetch completed tests
         const { data: completedTests } = await supabase
           .from('test_results')
-          .select('completed_at, time_spent')
+          .select('completed_at, time_taken')
           .eq('user_id', user.id)
           .gte('completed_at', startDate)
           .lte('completed_at', endDate);
 
-        // Build calendar data map
+        // Fetch created mock tests
+        const { data: createdTests } = await supabase
+          .from('mock_tests')
+          .select('created_at')
+          .eq('user_id', user.id)
+          .gte('created_at', startDate)
+          .lte('created_at', endDate);
+
         const dataMap = new Map<string, DayData>();
 
-        // Process scheduled tests and count them
         scheduledTests?.forEach((test) => {
           const dateStr = test.scheduled_date;
           if (!dataMap.has(dateStr)) {
             dataMap.set(dateStr, { scheduledTestCount: 0, completedTests: 0, studyMinutes: 0 });
           }
-          const data = dataMap.get(dateStr)!;
-          data.scheduledTestCount += 1;
+          dataMap.get(dateStr)!.scheduledTestCount += 1;
         });
 
-        // Process completed tests
         completedTests?.forEach((test) => {
           const dateStr = test.completed_at.split('T')[0];
           if (!dataMap.has(dateStr)) {
             dataMap.set(dateStr, { scheduledTestCount: 0, completedTests: 0, studyMinutes: 0 });
           }
-          const data = dataMap.get(dateStr)!;
-          data.completedTests += 1;
-          data.studyMinutes += test.time_spent || 0;
+          const d = dataMap.get(dateStr)!;
+          d.completedTests += 1;
+          d.studyMinutes += Math.round((test.time_taken || 0) / 60);
+        });
+
+        createdTests?.forEach((test) => {
+          const dateStr = test.created_at.split('T')[0];
+          if (!dataMap.has(dateStr)) {
+            dataMap.set(dateStr, { scheduledTestCount: 0, completedTests: 0, studyMinutes: 0 });
+          }
+          dataMap.get(dateStr)!.completedTests += 1;
         });
 
         setCalendarData(dataMap);
@@ -117,10 +137,11 @@ export function StudyCalendar() {
       days.push({
         date: prevMonthLastDay - i,
         isCurrentMonth: false,
+        dateStr: ''
       });
     }
 
-    // Current month days with real data from database
+    // Current month days
     const isCurrentMonthAndYear = 
       month === today.getMonth() && year === today.getFullYear();
     
@@ -131,6 +152,7 @@ export function StudyCalendar() {
       days.push({
         date: i,
         isCurrentMonth: true,
+        dateStr,
         hasTest: (dayData?.scheduledTestCount || 0) > 0,
         completed: (dayData?.completedTests || 0) > 0,
         studyMinutes: dayData?.studyMinutes || 0,
@@ -139,12 +161,14 @@ export function StudyCalendar() {
       });
     }
 
-    // Next month days
-    const remainingDays = 42 - days.length;
+    // Next month days to fill 35 or 42 grid
+    const totalSlots = days.length > 35 ? 42 : 35;
+    const remainingDays = totalSlots - days.length;
     for (let i = 1; i <= remainingDays; i++) {
       days.push({
         date: i,
         isCurrentMonth: false,
+        dateStr: ''
       });
     }
 
@@ -162,140 +186,108 @@ export function StudyCalendar() {
   };
 
   return (
-    <div className="space-y-2 sm:space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5 sm:gap-2">
-          <CalendarIcon className="h-4 w-4 sm:h-5 sm:w-5 text-violet-600 dark:text-violet-400" />
-          <h3 className="text-sm sm:text-lg font-semibold text-gray-900 dark:text-white">
-            {months[currentDate.getMonth()]} {currentDate.getFullYear()}
-          </h3>
-        </div>
-        <div className="flex gap-0.5 sm:gap-1">
+    <div className="space-y-3">
+      {/* Month Navigation Header */}
+      <div className="flex items-center justify-between pb-1">
+        <h3 className="text-sm sm:text-base font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
+          <span>{months[currentDate.getMonth()]}</span>
+          <span className="text-gray-500 dark:text-gray-400 font-medium">{currentDate.getFullYear()}</span>
+        </h3>
+        <div className="flex items-center gap-1">
           <Button
             variant="ghost"
             size="icon"
             onClick={prevMonth}
-            className="h-6 w-6 sm:h-8 sm:w-8 text-gray-600 dark:text-gray-400 hover:text-violet-600 dark:hover:text-white hover:bg-violet-50 dark:hover:bg-slate-800 transition-colors"
+            className="h-7 w-7 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-slate-800"
           >
-            <ChevronLeft className="h-3 w-3 sm:h-4 sm:w-4" />
+            <ChevronLeft className="h-4 w-4" />
           </Button>
           <Button
             variant="ghost"
             size="icon"
             onClick={nextMonth}
-            className="h-6 w-6 sm:h-8 sm:w-8 text-gray-600 dark:text-gray-400 hover:text-violet-600 dark:hover:text-white hover:bg-violet-50 dark:hover:bg-slate-800 transition-colors"
+            className="h-7 w-7 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-slate-800"
           >
-            <ChevronRight className="h-3 w-3 sm:h-4 sm:w-4" />
+            <ChevronRight className="h-4 w-4" />
           </Button>
         </div>
       </div>
 
-      {/* Days of week */}
-      <div className="grid grid-cols-7 gap-0.5 sm:gap-1 md:gap-2">
+      {/* Weekday headers */}
+      <div className="grid grid-cols-7 gap-1 text-center">
         {daysOfWeek.map((day) => (
-          <div key={day} className="text-center text-[10px] sm:text-xs font-semibold text-gray-500 dark:text-gray-500 py-1 sm:py-2">
-            {day.slice(0, 1)}<span className="hidden sm:inline">{day.slice(1)}</span>
+          <div key={day} className="text-[11px] font-bold text-gray-400 dark:text-gray-500 py-1">
+            {day.slice(0, 1)}
           </div>
         ))}
       </div>
 
-      {/* Calendar grid */}
+      {/* Days Grid */}
       <AnimatePresence mode="wait">
         <motion.div
           key={`${currentDate.getMonth()}-${currentDate.getFullYear()}`}
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          exit={{ opacity: 0, x: -20 }}
-          transition={{ duration: 0.2 }}
-          className="grid grid-cols-7 gap-0.5 sm:gap-1 md:gap-2"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+          className="grid grid-cols-7 gap-1"
         >
           {days.map((day, index) => {
             const isToday = day.isToday;
-            
+            const hasActivity = day.completed;
+            const hasScheduled = day.hasTest;
+
             return (
-              <motion.div
+              <div
                 key={`${index}-${day.date}`}
                 className={`
-                  aspect-square p-0.5 sm:p-1 rounded-lg sm:rounded-xl text-xs sm:text-sm relative transition-all font-bold min-h-[40px] sm:min-h-[65px] flex flex-col
+                  relative h-9 sm:h-10 flex flex-col items-center justify-center rounded-lg text-xs font-semibold transition-all
                   ${!day.isCurrentMonth 
-                    ? 'text-gray-300 dark:text-gray-700 opacity-40' 
+                    ? 'text-gray-300 dark:text-gray-700 pointer-events-none' 
+                    : 'text-gray-800 dark:text-gray-200 hover:bg-violet-50 dark:hover:bg-slate-800/80 cursor-pointer'}
+                  ${isToday 
+                    ? 'bg-violet-600 text-white font-bold shadow-md shadow-violet-500/20 hover:bg-violet-700' 
                     : ''}
-                  ${isToday
-                    ? 'bg-yellow-400 dark:bg-yellow-400 text-black ring-1 sm:ring-2 ring-yellow-500 dark:ring-yellow-500'
-                    : 'text-gray-700 dark:text-gray-300'}
+                  ${hasActivity && !isToday 
+                    ? 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-900 dark:text-emerald-300 font-bold border border-emerald-300 dark:border-emerald-800/50' 
+                    : ''}
                 `}
+                title={
+                  day.isCurrentMonth
+                    ? `${day.date} ${months[currentDate.getMonth()]}${day.completed ? ' - Activity Recorded' : ''}${day.hasTest ? ' - Test Scheduled' : ''}`
+                    : ''
+                }
               >
-                {/* Date number */}
-                <div className="text-center mb-auto pt-0.5 sm:pt-1">
-                  <span className="text-xs sm:text-base font-bold">{day.date}</span>
-                </div>
+                <span>{day.date}</span>
                 
-                {/* Indicators container - Horizontal Layout */}
-                <div className="flex items-center justify-center gap-0.5 pb-0.5 sm:pb-1 flex-wrap">
-                  {/* Scheduled Test Count - Only show if count > 0 */}
-                  {day.scheduledCount && day.scheduledCount > 0 && (
-                    <motion.div
-                      initial={{ scale: 0 }}
-                      animate={{ scale: 1 }}
-                      title={`${day.scheduledCount} Test${day.scheduledCount > 1 ? 's' : ''} Scheduled`}
-                      className="px-1 py-0.5 rounded text-[8px] sm:text-xs font-bold bg-blue-500 text-white"
-                    >
-                      {day.scheduledCount}
-                    </motion.div>
+                {/* Subtle indicator dots */}
+                <div className="flex items-center gap-0.5 mt-0.5 h-1">
+                  {hasActivity && (
+                    <span className={`w-1 h-1 rounded-full ${isToday ? 'bg-white' : 'bg-emerald-500'}`} />
                   )}
-                  
-                  {/* Completed Icon */}
-                  {day.completed && (
-                    <motion.div
-                      initial={{ scale: 0 }}
-                      animate={{ scale: 1 }}
-                      title="Test Completed"
-                      className="p-0.5 rounded bg-green-500 dark:bg-green-600 hidden sm:block"
-                    >
-                      <CheckCircle2 className="h-2.5 w-2.5 sm:h-3 sm:w-3 text-black" />
-                    </motion.div>
-                  )}
-                  
-                  {/* Study Time - Hidden on mobile, too small */}
-                  {day.studyMinutes && day.studyMinutes > 0 && (
-                    <motion.div
-                      initial={{ scale: 0 }}
-                      animate={{ scale: 1 }}
-                      title={`Study Time: ${day.studyMinutes} minutes`}
-                      className="hidden sm:flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] font-bold bg-amber-500 dark:bg-amber-600 text-black"
-                    >
-                      <Clock className="h-2.5 w-2.5" />
-                      <span>{day.studyMinutes}</span>
-                    </motion.div>
+                  {hasScheduled && (
+                    <span className="w-1 h-1 rounded-full bg-blue-500" />
                   )}
                 </div>
-              </motion.div>
+              </div>
             );
           })}
         </motion.div>
       </AnimatePresence>
 
-      {/* Legend - Hidden on mobile */}
-      <div className="hidden sm:flex flex-wrap gap-4 text-xs pt-3 border-t border-gray-200 dark:border-slate-700">
-        <div className="flex items-center gap-2">
-          <div className="px-1.5 py-0.5 rounded bg-blue-500 text-white text-xs font-bold">
-            2
-          </div>
-          <span className="text-gray-600 dark:text-gray-400 font-medium">Tests Scheduled</span>
+      {/* Clean, minimal Legend */}
+      <div className="flex items-center justify-center gap-4 text-[11px] pt-2 border-t border-gray-200 dark:border-slate-800 text-gray-500 dark:text-gray-400 font-medium">
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-violet-600" />
+          <span>Today</span>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="p-1 rounded bg-green-500 dark:bg-green-600">
-            <CheckCircle2 className="h-3 w-3 text-black" />
-          </div>
-          <span className="text-gray-600 dark:text-gray-400 font-medium">Completed</span>
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-emerald-500" />
+          <span>Active / Completed</span>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-0.5 px-1.5 py-1 rounded bg-amber-500 dark:bg-amber-600">
-            <Clock className="h-3 w-3 text-black" />
-            <span className="text-black text-[9px] font-bold">45</span>
-          </div>
-          <span className="text-gray-600 dark:text-gray-400 font-medium">Study Time (minutes)</span>
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-blue-500" />
+          <span>Scheduled</span>
         </div>
       </div>
     </div>

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion } from "motion/react";
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
@@ -115,6 +116,7 @@ function getInitials(name: string): string {
 }
 
 export function Dashboard() {
+  const router = useRouter();
   const [userName, setUserName] = useState<string>('User');
   const [examType, setExamType] = useState<string>('UPSC');
   const [studyStreak, setStudyStreak] = useState<number>(0);
@@ -135,10 +137,11 @@ export function Dashboard() {
   const [subjectData, setSubjectData] = useState<SubjectData[]>([]);
   const [upcomingTests, setUpcomingTests] = useState<UpcomingTest[]>([]);
   const [recentActivity, setRecentActivity] = useState<RecentActivity[]>([]);
+  const [warehouseCount, setWarehouseCount] = useState<number>(0);
   const [weeklyGoals, setWeeklyGoals] = useState<WeeklyGoal[]>([
     { goal: 'Complete 5 Tests', current: 0, total: 5, color: 'violet' },
-    { goal: 'Study 20 Hours', current: 0, total: 20, color: 'blue' },
-    { goal: 'Review 10 Topics', current: 0, total: 10, color: 'emerald' },
+    { goal: 'Study 5 Hours', current: 0, total: 5, color: 'blue' },
+    { goal: 'Explore 5 Topics', current: 0, total: 5, color: 'emerald' },
   ]);
   
   const supabase = useMemo(() => createClient(), []);
@@ -156,57 +159,51 @@ export function Dashboard() {
         .eq('status', 'completed')
         .order('created_at', { ascending: false });
 
-      console.log('Completed tests from mock_tests:', { 
-        count: completedTests?.length, 
-        error: testsError,
-        data: completedTests 
-      });
-
       if (testsError) {
         console.error('Error fetching completed tests:', testsError);
-        return;
       }
 
-      // Also try to fetch test results for scores and time data
+      // Fetch test results for scores and time data (time_taken is the DB column)
       const { data: testResults, error: resultsError } = await supabase
         .from('test_results')
-        .select('score, time_spent, completed_at, test_id')
+        .select('score, time_taken, completed_at, test_id')
         .eq('user_id', currentUserId)
         .order('completed_at', { ascending: false });
 
-      console.log('Test results data:', { 
-        count: testResults?.length, 
-        error: resultsError,
-        data: testResults 
-      });
+      if (resultsError) {
+        console.error('Error fetching test results:', resultsError);
+      }
 
       // Calculate stats
-      const totalTests = completedTests?.length || 0;
+      const totalTests = Math.max(completedTests?.length || 0, testResults?.length || 0);
       const now = new Date();
       const weekStart = new Date(now.getTime());
       weekStart.setDate(weekStart.getDate() - weekStart.getDay());
       weekStart.setHours(0, 0, 0, 0);
 
-      const testsThisWeek = completedTests?.filter(t => 
+      const testsThisWeek = (testResults || []).filter(t => 
+        new Date(t.completed_at) >= weekStart
+      ).length || (completedTests || []).filter(t => 
         new Date(t.created_at) >= weekStart
       ).length || 0;
 
       // Calculate average score from test_results if available
       const avgScore = testResults && testResults.length > 0
-        ? Math.round(testResults.reduce((acc, r) => acc + (r.score || 0), 0) / testResults.length)
+        ? Math.round(testResults.reduce((acc, r) => acc + (Number(r.score) || 0), 0) / testResults.length)
         : 0;
 
-      // Calculate score improvement (compare last 5 tests vs previous 5)
+      // Calculate score improvement (compare recent tests vs older tests)
       let scoreImprovement = 0;
-      if (testResults && testResults.length >= 10) {
-        const recent5 = testResults.slice(0, 5).reduce((acc, r) => acc + (r.score || 0), 0) / 5;
-        const prev5 = testResults.slice(5, 10).reduce((acc, r) => acc + (r.score || 0), 0) / 5;
-        scoreImprovement = Math.round(recent5 - prev5);
+      if (testResults && testResults.length >= 2) {
+        const half = Math.floor(testResults.length / 2);
+        const recent = testResults.slice(0, half).reduce((acc, r) => acc + (Number(r.score) || 0), 0) / half;
+        const older = testResults.slice(half).reduce((acc, r) => acc + (Number(r.score) || 0), 0) / (testResults.length - half);
+        scoreImprovement = Math.round(recent - older);
       }
 
-      // Calculate total study time (from time_spent in seconds)
-      const totalStudyTimeSeconds = testResults?.reduce((acc, r) => acc + (r.time_spent || 0), 0) || 0;
-      const studyTimeHours = Math.round(totalStudyTimeSeconds / 3600 * 10) / 10;
+      // Calculate total study time (from time_taken in seconds)
+      const totalStudyTimeSeconds = testResults?.reduce((acc, r) => acc + (r.time_taken || 0), 0) || 0;
+      const studyTimeHours = Math.round((totalStudyTimeSeconds / 3600) * 10) / 10;
 
       // Get user's rank based on total_points
       const { data: userData } = await supabase
@@ -214,6 +211,14 @@ export function Dashboard() {
         .select('total_points')
         .eq('id', currentUserId)
         .single();
+
+      // Fetch total tests in warehouse
+      const { count: draftCount } = await supabase
+        .from('mock_tests')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', currentUserId);
+
+      setWarehouseCount(draftCount || 0);
 
       const userPoints = userData?.total_points || 0;
 
@@ -223,7 +228,7 @@ export function Dashboard() {
         .select('*', { count: 'exact', head: true })
         .gt('total_points', userPoints);
 
-      const globalRank = (higherRankedCount || 0) + 1;
+      const globalRank = userPoints > 0 || totalTests > 0 ? (higherRankedCount || 0) + 1 : 1;
 
       setStats({
         testsCompleted: totalTests,
@@ -232,15 +237,14 @@ export function Dashboard() {
         scoreImprovement,
         studyTimeHours,
         globalRank,
-        rankChange: 0 // Would need historical data to calculate
+        rankChange: 0
       });
 
       // Update weekly goals
-      // For topics, we don't have topic_wise_score anymore, so just use a placeholder
       setWeeklyGoals([
-        { goal: 'Complete 5 Tests', current: testsThisWeek, total: 5, color: 'violet' },
-        { goal: 'Study 20 Hours', current: Math.min(Math.round(studyTimeHours), 20), total: 20, color: 'blue' },
-        { goal: 'Review 10 Topics', current: Math.min(totalTests, 10), total: 10, color: 'emerald' },
+        { goal: 'Complete 5 Tests', current: Math.min(testsThisWeek, 5), total: 5, color: 'violet' },
+        { goal: 'Study 5 Hours', current: Math.min(Math.round(studyTimeHours), 5), total: 5, color: 'blue' },
+        { goal: 'Explore 5 Topics', current: Math.min(Math.max(totalTests, draftCount || 0), 5), total: 5, color: 'emerald' },
       ]);
 
       console.log('Updated stats:', {
@@ -270,7 +274,6 @@ export function Dashboard() {
         .from('test_results')
         .select('score, time_taken, completed_at')
         .eq('user_id', currentUserId)
-        .gte('completed_at', weekAgo.toISOString())
         .order('completed_at', { ascending: true });
 
       if (error) {
@@ -279,16 +282,18 @@ export function Dashboard() {
       }
 
       // Group by day of week
-      const dailyData: { [key: string]: { scores: number[], time: number } } = {};
+      const dailyData: { [key: string]: { scores: number[], timeMinutes: number } } = {};
       days.forEach(day => {
-        dailyData[day] = { scores: [], time: 0 };
+        dailyData[day] = { scores: [], timeMinutes: 0 };
       });
 
       testResults?.forEach(result => {
         const date = new Date(result.completed_at);
-        const dayName = days[date.getDay()];
-        dailyData[dayName].scores.push(result.score || 0);
-        dailyData[dayName].time += (result.time_taken || 0) / 3600; // Convert to hours
+        if (date >= weekAgo) {
+          const dayName = days[date.getDay()];
+          dailyData[dayName].scores.push(Number(result.score) || 0);
+          dailyData[dayName].timeMinutes += Math.round((result.time_taken || 0) / 60);
+        }
       });
 
       // Create chart data starting from today and going back 7 days
@@ -305,7 +310,7 @@ export function Dashboard() {
         chartData.push({
           date: dayName,
           score: avgScore,
-          time: Math.round(dayData.time * 10) / 10
+          time: dayData.timeMinutes
         });
       }
 
@@ -333,21 +338,14 @@ export function Dashboard() {
       const topicCounts: { [key: string]: number } = {};
       
       mockTests?.forEach((test) => {
-        if (test.topic) {
-          // Handle comma-separated topics
-          const topics = test.topic.split(',').map((t: string) => t.trim());
-          topics.forEach((topic: string) => {
-            if (topic) {
-              topicCounts[topic] = (topicCounts[topic] || 0) + 1;
-            }
-          });
-        } else if (test.title) {
-          // Fallback: Extract topic from title (format: "Topic - Test Name" or just "Topic")
-          const titleParts = test.title.split('-').map((s: string) => s.trim());
-          const topic = titleParts[0];
-          if (topic && topic !== 'Mock Test') {
-            topicCounts[topic] = (topicCounts[topic] || 0) + 1;
-          }
+        let topic = test.topic?.trim();
+        // Fallback: If topic is empty or 'General', extract topic from title
+        if (!topic || topic === 'General') {
+          const titleParts = (test.title || '').split('-').map((s: string) => s.trim());
+          topic = titleParts[0] || 'General Studies';
+        }
+        if (topic) {
+          topicCounts[topic] = (topicCounts[topic] || 0) + 1;
         }
       });
 
@@ -370,44 +368,67 @@ export function Dashboard() {
     }
   }, [supabase]);
 
-  // Fetch upcoming tests (from scheduled_tests table, sorted by nearest date)
+  // Fetch upcoming / ready tests
   const fetchUpcomingTests = useCallback(async (currentUserId: string) => {
     try {
-      // Fetch scheduled tests that are in the future
-      const now = new Date();
-      const todayStr = now.toISOString().split('T')[0];
-      
-      const { data: scheduledTests, error } = await supabase
-        .from('scheduled_tests')
-        .select(`
-          id,
-          scheduled_date,
-          scheduled_time,
-          test_id,
-          mock_tests!inner(title, total_questions)
-        `)
-        .eq('user_id', currentUserId)
-        .gte('scheduled_date', todayStr)
-        .order('scheduled_date', { ascending: true })
-        .order('scheduled_time', { ascending: true })
-        .limit(3);
+      const formattedTests: UpcomingTest[] = [];
 
-      if (error) {
-        console.error('Error fetching upcoming tests:', error);
-        return;
+      // 1. Try fetching from scheduled_tests if available
+      try {
+        const todayStr = new Date().toISOString().split('T')[0];
+        const { data: scheduledTests } = await supabase
+          .from('scheduled_tests')
+          .select(`
+            id,
+            scheduled_date,
+            scheduled_time,
+            test_id,
+            mock_tests(title, total_questions)
+          `)
+          .eq('user_id', currentUserId)
+          .gte('scheduled_date', todayStr)
+          .order('scheduled_date', { ascending: true })
+          .limit(3);
+
+        if (scheduledTests && scheduledTests.length > 0) {
+          scheduledTests.forEach(test => {
+            const dateTime = new Date(`${test.scheduled_date}T${test.scheduled_time || '00:00'}`);
+            const mockTest = Array.isArray(test.mock_tests) ? test.mock_tests[0] : test.mock_tests;
+            formattedTests.push({
+              id: test.id,
+              title: mockTest?.title || 'Scheduled Test',
+              date: dateTime.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+              time: test.scheduled_time || 'Scheduled',
+              questions: mockTest?.total_questions || 0
+            });
+          });
+        }
+      } catch {
+        // scheduled_tests table might not exist
       }
 
-      const formattedTests: UpcomingTest[] = scheduledTests?.map(test => {
-        const dateTime = new Date(`${test.scheduled_date}T${test.scheduled_time}`);
-        const mockTest = Array.isArray(test.mock_tests) ? test.mock_tests[0] : test.mock_tests;
-        return {
-          id: test.id,
-          title: mockTest?.title || 'Scheduled Test',
-          date: dateTime.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-          time: dateTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
-          questions: mockTest?.total_questions || 0
-        };
-      }) || [];
+      // 2. If no scheduled tests, show ready tests from mock_tests (draft / available tests)
+      if (formattedTests.length === 0) {
+        const { data: availableTests } = await supabase
+          .from('mock_tests')
+          .select('id, title, total_questions, created_at')
+          .eq('user_id', currentUserId)
+          .order('created_at', { ascending: false })
+          .limit(3);
+
+        if (availableTests && availableTests.length > 0) {
+          availableTests.forEach(test => {
+            const dateTime = new Date(test.created_at);
+            formattedTests.push({
+              id: test.id,
+              title: test.title,
+              date: dateTime.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+              time: 'Ready to take',
+              questions: test.total_questions || 10
+            });
+          });
+        }
+      }
 
       setUpcomingTests(formattedTests);
     } catch (error) {
@@ -415,58 +436,85 @@ export function Dashboard() {
     }
   }, [supabase]);
 
-  // Fetch recent activity
+  // Fetch recent activity across tests, generated mock tests, and uploaded materials
   const fetchRecentActivity = useCallback(async (currentUserId: string) => {
     try {
       const activities: RecentActivity[] = [];
 
-      // Fetch recent test results from test_results table
-      const { data: testResults, error: testError } = await supabase
+      // 1. Fetch recent completed test results from test_results
+      const { data: testResults } = await supabase
         .from('test_results')
-        .select('id, score, completed_at, test_id')
+        .select('id, score, completed_at, test_id, mock_tests(title)')
         .eq('user_id', currentUserId)
         .order('completed_at', { ascending: false })
-        .limit(10);
+        .limit(5);
 
-      if (testError) {
-        console.error('Error fetching test results:', testError);
-      }
-
-      // Get test titles for the results
       if (testResults && testResults.length > 0) {
-        const testIds = testResults.map(r => r.test_id).filter(Boolean);
-        
-        if (testIds.length > 0) {
-          const { data: testsData } = await supabase
-            .from('mock_tests')
-            .select('id, title')
-            .in('id', testIds);
-          
-          const testTitleMap: { [key: string]: string } = {};
-          testsData?.forEach(t => {
-            testTitleMap[t.id] = t.title;
+        testResults.forEach((result: any) => {
+          const testTitle = Array.isArray(result.mock_tests)
+            ? result.mock_tests[0]?.title
+            : result.mock_tests?.title || 'Mock Test';
+          const timestamp = new Date(result.completed_at);
+          activities.push({
+            id: result.id,
+            action: `Completed ${testTitle}`,
+            score: Math.round(Number(result.score)),
+            time: formatRelativeTime(timestamp),
+            timestamp: timestamp,
+            type: 'test'
           });
-
-          testResults.forEach(result => {
-            if (result.test_id && testTitleMap[result.test_id]) {
-              const timestamp = new Date(result.completed_at);
-              activities.push({
-                id: result.id,
-                action: `Completed ${testTitleMap[result.test_id]}`,
-                score: result.score,
-                time: formatRelativeTime(timestamp),
-                timestamp: timestamp,
-                type: 'test'
-              });
-            }
-          });
-        }
+        });
       }
 
-      // Sort by most recent using actual timestamps
+      // 2. Fetch recently generated mock tests
+      const { data: recentTests } = await supabase
+        .from('mock_tests')
+        .select('id, title, created_at')
+        .eq('user_id', currentUserId)
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      if (recentTests && recentTests.length > 0) {
+        recentTests.forEach(test => {
+          const timestamp = new Date(test.created_at);
+          activities.push({
+            id: `test-${test.id}`,
+            action: `Generated test: ${test.title}`,
+            time: formatRelativeTime(timestamp),
+            timestamp: timestamp,
+            type: 'practice'
+          });
+        });
+      }
+
+      // 3. Fetch recently uploaded study materials
+      const { data: recentMaterials } = await supabase
+        .from('study_materials')
+        .select('id, file_url, created_at')
+        .eq('user_id', currentUserId)
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      if (recentMaterials && recentMaterials.length > 0) {
+        recentMaterials.forEach(m => {
+          const fileName = m.file_url 
+            ? decodeURIComponent(m.file_url.split('/').pop()?.replace(/^\d+-/, '') || 'Document') 
+            : 'Document';
+          const timestamp = new Date(m.created_at);
+          activities.push({
+            id: `mat-${m.id}`,
+            action: `Uploaded ${fileName}`,
+            time: formatRelativeTime(timestamp),
+            timestamp: timestamp,
+            type: 'upload'
+          });
+        });
+      }
+
+      // Sort all activities chronologically descending
       activities.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
 
-      setRecentActivity(activities.slice(0, 3));
+      setRecentActivity(activities.slice(0, 4));
     } catch (error) {
       console.error('Error fetching recent activity:', error);
     }
@@ -475,36 +523,51 @@ export function Dashboard() {
   // Calculate study streak
   const calculateStudyStreak = useCallback(async (currentUserId: string) => {
     try {
-      // Get all test completion dates from test_results table
-      const { data: testResults, error } = await supabase
+      const { data: testResults } = await supabase
         .from('test_results')
         .select('completed_at')
         .eq('user_id', currentUserId)
         .order('completed_at', { ascending: false });
 
-      if (error || !testResults?.length) {
+      const { data: createdTests } = await supabase
+        .from('mock_tests')
+        .select('created_at')
+        .eq('user_id', currentUserId);
+
+      const studyDates = new Set<string>();
+      testResults?.forEach(r => {
+        if (r.completed_at) studyDates.add(new Date(r.completed_at).toDateString());
+      });
+      createdTests?.forEach(t => {
+        if (t.created_at) studyDates.add(new Date(t.created_at).toDateString());
+      });
+
+      if (studyDates.size === 0) {
         setStudyStreak(0);
         return;
       }
 
-      // Get unique dates
-      const studyDates = new Set(
-        testResults.map(r => new Date(r.completed_at).toDateString())
-      );
-
-      // Calculate streak from today going backwards
       let streak = 0;
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
-      for (let i = 0; i < 365; i++) {
+      const hasToday = studyDates.has(today.toDateString());
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+      const hasYesterday = studyDates.has(yesterday.toDateString());
+
+      if (!hasToday && !hasYesterday) {
+        setStudyStreak(0);
+        return;
+      }
+
+      const startOffset = hasToday ? 0 : 1;
+      for (let i = startOffset; i < 365; i++) {
         const checkDate = new Date(today);
         checkDate.setDate(checkDate.getDate() - i);
-        
         if (studyDates.has(checkDate.toDateString())) {
           streak++;
-        } else if (i > 0) {
-          // Allow one day gap (yesterday can be missing if checking today)
+        } else {
           break;
         }
       }
@@ -624,15 +687,19 @@ export function Dashboard() {
           { 
             title: "Tests Completed", 
             value: stats.testsCompleted.toString(), 
-            change: `+${stats.testsThisWeek} this week`, 
+            change: stats.testsCompleted > 0 
+              ? `+${stats.testsThisWeek} this week` 
+              : `${warehouseCount} ready in warehouse`, 
             icon: Target, 
             iconBg: "bg-gradient-to-br from-emerald-400 to-teal-500",
             iconColor: "text-white"
           },
           { 
             title: "Average Score", 
-            value: `${stats.averageScore}%`, 
-            change: `${stats.scoreImprovement >= 0 ? '+' : ''}${stats.scoreImprovement}% improvement`, 
+            value: stats.testsCompleted > 0 ? `${stats.averageScore}%` : '—', 
+            change: stats.testsCompleted > 0 
+              ? `${stats.scoreImprovement >= 0 ? '+' : ''}${stats.scoreImprovement}% improvement` 
+              : 'Complete a test to get scored', 
             icon: TrendingUp, 
             iconBg: "bg-gradient-to-br from-violet-400 to-purple-500",
             iconColor: "text-white"
@@ -640,7 +707,7 @@ export function Dashboard() {
           { 
             title: "Study Time", 
             value: `${stats.studyTimeHours}h`, 
-            change: "This week", 
+            change: stats.studyTimeHours > 0 ? "Total practice time" : "Start practicing", 
             icon: Clock, 
             iconBg: "bg-gradient-to-br from-amber-400 to-orange-500",
             iconColor: "text-white"
@@ -648,7 +715,7 @@ export function Dashboard() {
           { 
             title: "Global Rank", 
             value: stats.globalRank > 0 ? `#${stats.globalRank}` : '-', 
-            change: stats.rankChange !== 0 ? `${stats.rankChange > 0 ? '+' : ''}${stats.rankChange} positions` : 'Keep going!', 
+            change: stats.rankChange !== 0 ? `${stats.rankChange > 0 ? '+' : ''}${stats.rankChange} positions` : 'Keep practicing!', 
             icon: Trophy, 
             iconBg: "bg-gradient-to-br from-rose-400 to-pink-500",
             iconColor: "text-white"
@@ -699,14 +766,14 @@ export function Dashboard() {
               transition: { duration: 0.2 }
             }}
           >
-            <Card className="rounded-xl sm:rounded-2xl bg-[#F9F6F2] dark:bg-[#1a1a1a] border-2 sm:border-[3px] border-black dark:border-white shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] dark:shadow-[3px_3px_0px_0px_rgba(255,255,255,1)] sm:dark:shadow-[4px_4px_0px_0px_rgba(255,255,255,1)] group-hover:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] sm:group-hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] dark:group-hover:shadow-[4px_4px_0px_0px_rgba(255,255,255,1)] sm:dark:group-hover:shadow-[6px_6px_0px_0px_rgba(255,255,255,1)] transition-all duration-200 overflow-hidden">
-              <CardHeader className="bg-gradient-to-br from-amber-400 via-orange-500 to-red-500 dark:from-amber-500 dark:via-orange-600 dark:to-red-600 border-b-2 sm:border-b-[3px] border-black dark:border-white p-3 sm:p-6">
-                <CardTitle className="text-black flex items-center gap-1.5 sm:gap-2 font-bold text-sm sm:text-base">
-                  <Calendar className="h-4 w-4 sm:h-5 sm:w-5 text-black" />
+            <Card className="rounded-xl sm:rounded-2xl bg-[#F9F6F2] dark:bg-[#1a1a1a] border-2 sm:border-[3px] border-black dark:border-white shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] dark:shadow-[3px_3px_0px_0px_rgba(255,255,255,1)] sm:dark:shadow-[4px_4px_0px_0px_rgba(255,255,255,1)] group-hover:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] sm:group-hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] dark:group-hover:shadow-[4px_4px_0px_0px_rgba(255,255,255,1)] sm:dark:group-hover:shadow-[6px_6px_0px_0px_rgba(255,255,255,1)] transition-all duration-200">
+              <CardHeader className="p-3 sm:p-5 pb-2">
+                <CardTitle className="text-black dark:text-white flex items-center gap-2 font-bold text-sm sm:text-base">
+                  <Calendar className="h-4 w-4 sm:h-5 sm:w-5 text-violet-600 dark:text-violet-400" />
                   Study Calendar
                 </CardTitle>
               </CardHeader>
-              <CardContent className="p-3 sm:p-4 md:p-6">
+              <CardContent className="p-3 sm:p-5 pt-0">
                 <StudyCalendar />
               </CardContent>
             </Card>
@@ -730,7 +797,12 @@ export function Dashboard() {
                     <Zap className="h-4 w-4 sm:h-5 sm:w-5 text-black dark:text-white" />
                     Upcoming Tests
                   </span>
-                  <Button variant="ghost" size="sm" className="text-[#555555] dark:text-gray-400 h-7 sm:h-8 text-xs sm:text-sm font-medium px-2 sm:px-3">
+                  <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    onClick={() => router.push('/dashboard/test-history')}
+                    className="text-[#555555] dark:text-gray-400 h-7 sm:h-8 text-xs sm:text-sm font-medium px-2 sm:px-3 hover:text-black dark:hover:text-white"
+                  >
                     View All
                     <ChevronRight className="h-3 w-3 sm:h-4 sm:w-4 ml-0.5 sm:ml-1" />
                   </Button>
@@ -743,7 +815,8 @@ export function Dashboard() {
                     initial={{ opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ delay: 0.4 + index * 0.1 }}
-                    className="p-3 rounded-xl bg-white dark:bg-[#2a2a2a] border-[2px] border-black dark:border-white shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] dark:shadow-[2px_2px_0px_0px_rgba(255,255,255,0.5)] cursor-pointer"
+                    onClick={() => router.push('/dashboard/test-history')}
+                    className="p-3 rounded-xl bg-white dark:bg-[#2a2a2a] border-[2px] border-black dark:border-white shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] dark:shadow-[2px_2px_0px_0px_rgba(255,255,255,0.5)] cursor-pointer hover:translate-x-1 transition-transform"
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
@@ -872,51 +945,72 @@ export function Dashboard() {
                 </div>
                 </CardHeader>
                 <CardContent className="p-3 pt-0 sm:p-6 sm:pt-0">
-                  <div className="h-[200px] sm:h-[280px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={performanceData}>
-                      <defs>
-                        <linearGradient id="scoreGradient" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor="#8b5cf6" stopOpacity={0.3}/>
-                          <stop offset="100%" stopColor="#8b5cf6" stopOpacity={0}/>
-                        </linearGradient>
-                        <linearGradient id="timeGradient" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.3}/>
-                          <stop offset="100%" stopColor="#3b82f6" stopOpacity={0}/>
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.3} />
-                      <XAxis dataKey="date" stroke="#64748b" fontSize={12} />
-                      <YAxis stroke="#64748b" fontSize={12} />
-                      <Tooltip 
-                        contentStyle={{ 
-                          backgroundColor: '#0f172a', 
-                          border: '1px solid #334155',
-                          borderRadius: '12px',
-                          color: '#fff'
-                        }} 
-                      />
-                      <Line 
-                        type="monotone" 
-                        dataKey="score" 
-                        stroke="#8b5cf6" 
-                        strokeWidth={3} 
-                        dot={{ fill: '#8b5cf6', r: 6, strokeWidth: 2, stroke: '#1e293b' }}
-                        activeDot={{ r: 8 }}
-                        fill="url(#scoreGradient)"
-                      />
-                      <Line 
-                        type="monotone" 
-                        dataKey="time" 
-                        stroke="#3b82f6" 
-                        strokeWidth={3} 
-                        dot={{ fill: '#3b82f6', r: 6, strokeWidth: 2, stroke: '#1e293b' }}
-                        activeDot={{ r: 8 }}
-                        fill="url(#timeGradient)"
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                  </div>
+                  {performanceData.some(d => d.score > 0 || d.time > 0) ? (
+                    <div className="h-[200px] sm:h-[280px]">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={performanceData}>
+                          <defs>
+                            <linearGradient id="scoreGradient" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor="#8b5cf6" stopOpacity={0.3}/>
+                              <stop offset="100%" stopColor="#8b5cf6" stopOpacity={0}/>
+                            </linearGradient>
+                            <linearGradient id="timeGradient" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.3}/>
+                              <stop offset="100%" stopColor="#3b82f6" stopOpacity={0}/>
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.3} />
+                          <XAxis dataKey="date" stroke="#64748b" fontSize={12} />
+                          <YAxis stroke="#64748b" fontSize={12} />
+                          <Tooltip 
+                            contentStyle={{ 
+                              backgroundColor: '#0f172a', 
+                              border: '1px solid #334155',
+                              borderRadius: '12px',
+                              color: '#fff'
+                            }} 
+                          />
+                          <Line 
+                            type="monotone" 
+                            dataKey="score" 
+                            stroke="#8b5cf6" 
+                            strokeWidth={3} 
+                            dot={{ fill: '#8b5cf6', r: 6, strokeWidth: 2, stroke: '#1e293b' }}
+                            activeDot={{ r: 8 }}
+                            fill="url(#scoreGradient)"
+                            name="Score (%)"
+                          />
+                          <Line 
+                            type="monotone" 
+                            dataKey="time" 
+                            stroke="#3b82f6" 
+                            strokeWidth={3} 
+                            dot={{ fill: '#3b82f6', r: 6, strokeWidth: 2, stroke: '#1e293b' }}
+                            activeDot={{ r: 8 }}
+                            fill="url(#timeGradient)"
+                            name="Time (min)"
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  ) : (
+                    <div className="h-[200px] sm:h-[280px] flex flex-col items-center justify-center text-center p-4">
+                      <div className="p-3 rounded-xl bg-violet-100 dark:bg-violet-950/40 text-violet-600 dark:text-violet-400 border border-violet-200 dark:border-violet-800 mb-2">
+                        <BarChart3 className="h-6 w-6" />
+                      </div>
+                      <p className="text-sm font-bold text-black dark:text-white">No Test Attempts This Week</p>
+                      <p className="text-xs text-[#555555] dark:text-gray-400 mt-1 max-w-xs">
+                        Start a test from your warehouse to track your weekly score and study time trends!
+                      </p>
+                      <Button 
+                        onClick={() => router.push('/dashboard/test-history')}
+                        size="sm"
+                        className="mt-3 bg-violet-600 hover:bg-violet-700 text-white font-bold text-xs border-2 border-black dark:border-white shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-x-0.5 transition-transform"
+                      >
+                        Start Mock Test
+                      </Button>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
           </motion.div>
@@ -1005,22 +1099,29 @@ export function Dashboard() {
                   </CardTitle>
                 </CardHeader>
                   <CardContent className="space-y-3 sm:space-y-4 p-3 pt-0 sm:p-6 sm:pt-0">
-                    {weeklyGoals.map((item, index) => (
-                      <div key={index} className="space-y-2">
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-gray-700 dark:text-gray-300 font-medium">{item.goal}</span>
-                          <span className="text-gray-600 dark:text-gray-400 font-semibold">{item.current}/{item.total}</span>
+                    {weeklyGoals.map((item, index) => {
+                      const colorClass = 
+                        item.color === 'violet' ? 'from-violet-600 to-purple-500 bg-violet-600' :
+                        item.color === 'blue' ? 'from-blue-600 to-cyan-500 bg-blue-600' :
+                        'from-emerald-600 to-teal-500 bg-emerald-600';
+
+                      return (
+                        <div key={index} className="space-y-2">
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="text-gray-700 dark:text-gray-300 font-medium">{item.goal}</span>
+                            <span className="text-gray-600 dark:text-gray-400 font-semibold">{item.current}/{item.total}</span>
+                          </div>
+                          <div className="relative h-2.5 bg-gray-200 dark:bg-slate-800 rounded-full overflow-hidden">
+                            <motion.div
+                              initial={{ width: 0 }}
+                              animate={{ width: `${Math.min((item.current / item.total) * 100, 100)}%` }}
+                              transition={{ duration: 1, delay: 0.5 + index * 0.1 }}
+                              className={`h-full bg-gradient-to-r ${colorClass} rounded-full`}
+                            />
+                          </div>
                         </div>
-                        <div className="relative h-2 bg-gray-200 dark:bg-slate-800 rounded-full overflow-hidden">
-                          <motion.div
-                            initial={{ width: 0 }}
-                            animate={{ width: `${Math.min((item.current / item.total) * 100, 100)}%` }}
-                            transition={{ duration: 1, delay: 0.5 + index * 0.1 }}
-                            className={`h-full bg-gradient-to-r from-${item.color}-600 to-${item.color}-400`}
-                          />
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </CardContent>
                 </Card>
             </motion.div>

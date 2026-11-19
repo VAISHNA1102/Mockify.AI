@@ -106,6 +106,9 @@ export function MockTests() {
         setSelectedTopics(test.topic ? test.topic.split(', ') : []);
         setTestDuration(test.duration || 30);
         setTestName(test.name || '');
+        if (test.id) {
+          setCurrentTestId(test.id);
+        }
         sessionStorage.removeItem('loadTest');
         toast.success(`Loaded test: ${test.name}`);
         // Show instructions screen
@@ -322,6 +325,7 @@ export function MockTests() {
         .from('study_materials')
         .select('id, file_url, topic, created_at, material_type, structured_content')
         .eq('user_id', uid)
+        .eq('processing_status', 'completed')
         .order('created_at', { ascending: false });
       
       if (error) throw error;
@@ -391,11 +395,10 @@ export function MockTests() {
         })
       });
       
-      if (!response.ok) {
-        throw new Error('Failed to generate questions');
-      }
-      
       const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to generate questions');
+      }
       
       if (!data.questions || data.questions.length === 0) {
         toast.error('No questions were generated. Please try again.');
@@ -415,7 +418,7 @@ export function MockTests() {
       setCurrentScreen('instructions');
     } catch (error) {
       console.error('Error generating questions:', error);
-      toast.error('Failed to generate questions');
+      toast.error(error instanceof Error ? error.message : 'Failed to generate questions');
     } finally {
       setGeneratingQuestions(false);
     }
@@ -642,13 +645,35 @@ export function MockTests() {
             : ['Great job! Keep practicing to maintain your performance.']
         };
 
+        // Ensure question IDs are available for current questions
+        let currentQuestions = [...questions];
+        if (currentQuestions.some(q => !q.id) && currentTestId) {
+          try {
+            const { data: dbQuestions } = await supabase
+              .from('test_questions')
+              .select('id, question_number')
+              .eq('test_id', currentTestId);
+            if (dbQuestions && dbQuestions.length > 0) {
+              dbQuestions.forEach(dbQ => {
+                const idx = dbQ.question_number - 1;
+                if (currentQuestions[idx]) {
+                  currentQuestions[idx].id = dbQ.id;
+                }
+              });
+              setQuestions(currentQuestions);
+            }
+          } catch (e) {
+            console.error('Error fetching question IDs:', e);
+          }
+        }
+
         // Convert answers from index-based to ID-based for the API
         // Only include answered questions, skip empty/undefined answers
         const answersById: Record<string, string> = {};
         Object.entries(answers).forEach(([index, answer]) => {
           if (!answer) return; // Skip unanswered questions
           const questionIndex = parseInt(index);
-          const question = questions[questionIndex];
+          const question = currentQuestions[questionIndex];
           if (question && question.id) {
             answersById[question.id] = answer;
           }
@@ -713,6 +738,11 @@ export function MockTests() {
     setTestName(`Weak Topics Practice - ${topicNames}`);
 
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        throw new Error('Please log in to generate tests.');
+      }
+
       // Fetch user's materials
       const { data: userMaterials } = await supabase
         .from('study_materials')
@@ -725,7 +755,10 @@ export function MockTests() {
       // Generate questions for weak topics
       const response = await fetch('/api/generate-questions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`
+        },
         body: JSON.stringify({
           userId,
           materialIds: materialIds.length > 0 ? materialIds : [],
@@ -740,6 +773,9 @@ export function MockTests() {
       });
 
       const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to generate questions.');
+      }
 
       if (data.questions && data.questions.length > 0) {
         const generatedQuestions = data.questions;
@@ -756,11 +792,11 @@ export function MockTests() {
         toast.success(`Generated ${generatedQuestions.length} questions for weak topics!`);
         setCurrentScreen('instructions');
       } else {
-        toast.error('Failed to generate questions. Please try again.');
+        toast.error('No PDF-grounded questions were returned. Select relevant study material and try again.');
       }
     } catch (error) {
       console.error('Error generating weak topics test:', error);
-      toast.error('Error generating test. Please try again.');
+      toast.error(error instanceof Error ? error.message : 'Error generating test. Please try again.');
     } finally {
       setGeneratingQuestions(false);
     }

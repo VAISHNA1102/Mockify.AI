@@ -1,98 +1,118 @@
 /**
  * HuggingFace Embeddings Service
- * Uses HuggingFace Inference API - FREE tier: 30k requests/month
- * More reliable than local models in server environments
+ * Uses local Transformers.js inference with the same model for upload and search.
  */
 
-import { HfInference } from '@huggingface/inference';
+import { env, pipeline, type FeatureExtractionPipeline } from '@xenova/transformers';
 
-const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
+const EMBEDDING_MODEL = 'Xenova/all-mpnet-base-v2';
+const EMBEDDING_DIMENSIONS = 768;
 
-// Using sentence-transformers/paraphrase-MiniLM-L6-v2
-// 384 dimensions - fast and efficient for semantic search
-// Alternative 512-dim models don't exist in HuggingFace, so we'll use 384 or 768
-// Let's use 768 for better quality: sentence-transformers/all-mpnet-base-v2
-const EMBEDDING_MODEL = 'sentence-transformers/all-mpnet-base-v2';
+env.allowLocalModels = false;
+env.allowRemoteModels = true;
+env.useBrowserCache = false;
+env.backends.onnx.wasm.numThreads = 1;
+
+let embeddingPipeline: FeatureExtractionPipeline | null = null;
+let embeddingPipelinePromise: Promise<FeatureExtractionPipeline> | null = null;
+
+async function getEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
+  if (embeddingPipeline) {
+    return embeddingPipeline;
+  }
+
+  if (!embeddingPipelinePromise) {
+    console.log(`Loading local embedding model ${EMBEDDING_MODEL}...`);
+    embeddingPipelinePromise = pipeline('feature-extraction', EMBEDDING_MODEL, {
+      quantized: true
+    }).then((model) => {
+      embeddingPipeline = model;
+      console.log(`Local embedding model ${EMBEDDING_MODEL} loaded`);
+      return model;
+    }).catch((error: unknown) => {
+      embeddingPipelinePromise = null;
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('Local embedding model initialization failed:', error);
+      throw new Error(`Local embedding model initialization failed: ${message}`);
+    });
+  }
+
+  return embeddingPipelinePromise;
+}
 
 /**
- * Generate embedding vector for text using HuggingFace API with retry logic
+ * Generate a 768-dimensional embedding locally.
  * @param text - Text to embed (max ~512 tokens recommended)
  * @param retries - Number of retry attempts (default: 3)
  * @param silent - Suppress logs for batch processing (default: false)
  * @returns 768-dimensional embedding vector
  */
 export async function generateEmbedding(text: string, retries: number = 3, silent: boolean = false): Promise<number[]> {
-  if (!text || text.trim().length === 0) {
+  if (typeof text !== 'string' || text.trim().length === 0) {
     throw new Error('Text cannot be empty');
   }
 
-  // Model has 512 token limit (~2000 chars, but can handle up to 8000 with truncation)
   const truncatedText = text.slice(0, 8000);
   
   if (!silent) {
-    console.log(`Generating embedding via HuggingFace API (${truncatedText.length} chars)...`);
+    console.log(`Generating local embedding (${truncatedText.length} chars)...`);
   }
   
   let lastError: Error | null = null;
+  const maxAttempts = Number.isFinite(retries) ? Math.max(1, Math.floor(retries)) : 3;
   
-  for (let attempt = 1; attempt <= retries; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const embedding = await hf.featureExtraction({
-        model: EMBEDDING_MODEL,
-        inputs: truncatedText
+      const model = await getEmbeddingPipeline();
+      const output = await model(truncatedText, {
+        pooling: 'mean',
+        normalize: true
       });
+      const embedding = Array.from(output.data);
 
-      // Convert to number array (handle both array and nested array responses)
-      const embeddingArray = Array.isArray(embedding[0]) ? embedding[0] : embedding;
-      
+      if (embedding.length !== EMBEDDING_DIMENSIONS || embedding.some(value => !Number.isFinite(value))) {
+        throw new Error(
+          `Invalid embedding output: expected ${EMBEDDING_DIMENSIONS} finite values, received ${embedding.length}`
+        );
+      }
+
       if (!silent) {
-        console.log(`✓ Embedding generated (${embeddingArray.length} dimensions, expected: 768)`);
+        console.log(`Local embedding generated (${embedding.length} dimensions)`);
       }
-      
-      return embeddingArray as number[];
-    } catch (error: any) {
+
+      return embedding;
+    } catch (error: unknown) {
       lastError = error instanceof Error ? error : new Error(String(error));
-      
-      // Log attempt failure
-      console.warn(`⚠️ Attempt ${attempt}/${retries} failed:`, error?.message || error);
-      
-      // Don't retry on certain errors
-      if (error?.message?.includes('Invalid API key') || 
-          error?.message?.includes('unauthorized')) {
-        throw new Error('Invalid HuggingFace API key');
+
+      if (!silent) {
+        console.warn(`Local embedding attempt ${attempt}/${maxAttempts} failed:`, lastError.message);
       }
-      
-      // If not last attempt, wait before retrying with exponential backoff
-      if (attempt < retries) {
-        const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 5000); // 1s, 2s, 4s (max 5s)
-        console.log(`   Retrying in ${waitTime}ms...`);
+
+      if (attempt < maxAttempts) {
+        const waitTime = Math.min(500 * Math.pow(2, attempt - 1), 2000);
         await new Promise(resolve => setTimeout(resolve, waitTime));
       }
     }
   }
   
-  // All retries failed
-  console.error('❌ All retry attempts failed for HuggingFace embedding');
+  console.error('All local embedding attempts failed');
   throw new Error(
-    `Failed to generate embedding after ${retries} attempts: ${lastError?.message || 'Unknown error'}`
+    `Failed to generate local embedding after ${maxAttempts} attempts: ${lastError?.message || 'Unknown error'}`
   );
 }
 
 /**
- * Generate embeddings for multiple texts in batch with parallel processing
- * Uses concurrent requests for speed, with smart batching to avoid rate limits
+ * Generate embeddings for multiple texts using bounded local inference batches.
  */
 export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
   if (!texts || texts.length === 0) {
     throw new Error('Texts array cannot be empty');
   }
 
-  console.log(`🚀 Generating ${texts.length} embeddings in parallel batches...`);
+  console.log(`Generating ${texts.length} local embeddings in batches...`);
 
   const embeddings: number[][] = [];
-  const batchSize = 10; // Process 10 at a time (HuggingFace can handle this)
-  const delayBetweenBatches = 200; // Only 200ms delay between batches
-
+  const batchSize = 4;
   const startTime = Date.now();
 
   for (let i = 0; i < texts.length; i += batchSize) {
@@ -101,21 +121,15 @@ export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
     const totalBatches = Math.ceil(texts.length / batchSize);
     
     try {
-      // Process batch in parallel with silent mode (no individual logs)
       const batchEmbeddings = await Promise.all(
-        batch.map(text => generateEmbedding(text, 2, true)) // Silent mode for batch
+        batch.map(text => generateEmbedding(text, 2, true))
       );
       
       embeddings.push(...batchEmbeddings);
       
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.log(`✓ Batch ${batchNum}/${totalBatches} complete (${embeddings.length}/${texts.length} in ${elapsed}s)`);
-      
-      // Short delay between batches (except for last batch)
-      if (i + batchSize < texts.length) {
-        await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
-      }
-    } catch (error) {
+      console.log(`Embedding batch ${batchNum}/${totalBatches} complete (${embeddings.length}/${texts.length} in ${elapsed}s)`);
+    } catch (error: unknown) {
       console.error(`❌ Batch ${batchNum} failed:`, error);
       throw new Error(
         `Failed at batch ${batchNum}: ${error instanceof Error ? error.message : 'Unknown error'}`
@@ -184,99 +198,57 @@ export function findMostSimilar(
 }
 
 /**
- * Extract key phrases and summary from text using HuggingFace summarization
- * Uses facebook/bart-large-cnn for high-quality extractive summarization
- * Handles large documents (up to 10MB PDFs) by chunking and summarizing
+ * Extract representative sentences and frequent terms without a hosted inference call.
  */
 export async function extractKeyContent(text: string, maxLength: number = 1900): Promise<string> {
-  try {
-    if (!text || text.trim().length === 0) {
-      throw new Error('Text cannot be empty');
-    }
-
-    // For shorter texts, return as-is with basic cleanup
-    if (text.length <= maxLength) {
-      return text;
-    }
-
-    console.log(`Extracting key content from ${text.length} chars...`);
-    
-    // For large documents, chunk and summarize each part
-    const chunkSize = 3000; // BART can handle ~4000, use 3000 for safety
-    const chunks: string[] = [];
-    
-    for (let i = 0; i < text.length; i += chunkSize) {
-      chunks.push(text.slice(i, i + chunkSize));
-    }
-    
-    console.log(`Processing ${chunks.length} chunks...`);
-    
-    // Summarize each chunk (process up to 10 chunks to avoid rate limits)
-    const summaries: string[] = [];
-    const chunksToProcess = Math.min(chunks.length, 10);
-    
-    for (let i = 0; i < chunksToProcess; i++) {
-      try {
-        const summary = await hf.summarization({
-          model: 'facebook/bart-large-cnn',
-          inputs: chunks[i],
-          parameters: {
-            max_length: 150,
-            min_length: 30,
-            do_sample: false
-          }
-        });
-        summaries.push(summary.summary_text);
-      } catch (err) {
-        console.warn(`Chunk ${i} summarization failed:`, err);
-        // Use beginning of chunk as fallback
-        summaries.push(chunks[i].slice(0, 200));
-      }
-    }
-
-    console.log(`✓ Generated ${summaries.length} summaries`);
-    
-    // Extract important terms from FULL text
-    const words = text
-      .toLowerCase()
-      .replace(/[^\w\s]/g, ' ')
-      .split(/\s+/)
-      .filter(w => w.length > 3);
-    
-    const wordFreq = new Map<string, number>();
-    words.forEach(w => wordFreq.set(w, (wordFreq.get(w) || 0) + 1));
-    
-    // Get top terms (frequency 2-15 for large docs)
-    const importantWords = Array.from(wordFreq.entries())
-      .filter(([_, freq]) => freq >= 2 && freq <= 15)
-      .sort(([_, a], [__, b]) => b - a)
-      .slice(0, 100)
-      .map(([word]) => word)
-      .join(' ');
-    
-    // Combine: All summaries + Important terms
-    const combined = `${summaries.join(' ')} ${importantWords}`;
-    
-    return combined.slice(0, maxLength);
-  } catch (error) {
-    console.error('Key content extraction error:', error);
-    // Fallback: Extract from full text without AI
-    const words = text
-      .toLowerCase()
-      .replace(/[^\w\s]/g, ' ')
-      .split(/\s+/)
-      .filter(w => w.length > 3);
-    
-    const wordFreq = new Map<string, number>();
-    words.forEach(w => wordFreq.set(w, (wordFreq.get(w) || 0) + 1));
-    
-    const importantWords = Array.from(wordFreq.entries())
-      .filter(([_, freq]) => freq >= 2 && freq <= 15)
-      .sort(([_, a], [__, b]) => b - a)
-      .slice(0, 150)
-      .map(([word]) => word)
-      .join(' ');
-    
-    return importantWords.slice(0, maxLength);
+  if (!text || text.trim().length === 0) {
+    throw new Error('Text cannot be empty');
   }
+
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  const stopWords = new Set([
+    'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had', 'her', 'was',
+    'one', 'our', 'out', 'has', 'have', 'this', 'that', 'with', 'from', 'they', 'will'
+  ]);
+  const wordFrequencies = new Map<string, number>();
+  const words = text.toLowerCase().match(/[a-z0-9]{3,}/g) || [];
+  for (const word of words) {
+    if (!stopWords.has(word)) {
+      wordFrequencies.set(word, (wordFrequencies.get(word) || 0) + 1);
+    }
+  }
+
+  const sentences = (text.match(/[^.!?\n]+[.!?]?/g) || [])
+    .map(sentence => sentence.trim())
+    .filter(sentence => sentence.length > 30);
+  const scoredSentences = sentences.map((sentence, index) => {
+    const sentenceWords = sentence.toLowerCase().match(/[a-z0-9]{3,}/g) || [];
+    const score = sentenceWords.reduce((total, word) => total + (wordFrequencies.get(word) || 0), 0);
+    return { sentence, index, score };
+  });
+  const selectedSentences: Array<{ sentence: string; index: number; score: number }> = [];
+
+  for (const item of scoredSentences.sort((a, b) => b.score - a.score)) {
+    const candidate = [...selectedSentences, item].map(({ sentence }) => sentence).join(' ');
+    if (candidate.length > maxLength) {
+      continue;
+    }
+    selectedSentences.push(item);
+  }
+
+  const representativeText = selectedSentences
+    .sort((a, b) => a.index - b.index)
+    .map(({ sentence }) => sentence)
+    .join(' ');
+  const frequentTerms = Array.from(wordFrequencies.entries())
+    .filter(([, frequency]) => frequency > 1)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 80)
+    .map(([word]) => word)
+    .join(' ');
+
+  return `${representativeText} ${frequentTerms}`.trim().slice(0, maxLength);
 }

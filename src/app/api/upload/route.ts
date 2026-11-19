@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { extractAndChunkDocument, extractAndParseMCQs, isLikelyScanned, validateExtractionQuality } from '@/lib/langchain-extraction'
-import { generateEmbedding, generateEmbeddings, formatMaterialForEmbedding } from '@/lib/huggingface-embeddings'
+import { generateEmbeddings } from '@/lib/huggingface-embeddings'
 import { extractAndChunkPDF, sanitizeChunkText, CHUNK_STRATEGIES } from '@/lib/pdf-chunking'
 import { extractSyllabusTopics, extractTopicsWithPatterns, createTopicBasedChunks } from '@/lib/syllabus-extraction'
 
@@ -547,120 +547,17 @@ export async function POST(request: NextRequest) {
       
       const cleanStructuredContent = sanitizeStructuredContent(structuredContent)
       
-      // Generate embedding for semantic search using Gemini API
-      console.log('Generating semantic embedding via Gemini...')
-      let materialEmbedding: number[] | null = null
-      
-      try {
-        // Strategy: Use HuggingFace BART model for intelligent summarization + keyword extraction
-        // BART extracts the most important content automatically
-        
-        function extractKeyContentFast(fullText: string): string {
-          // Fast extraction scaled for documents up to 10MB (2M chars)
-          const docLength = fullText.length;
-          
-          const stopWords = new Set([
-            'the', 'is', 'at', 'which', 'on', 'in', 'and', 'or', 'of', 'to', 'a', 'an',
-            'for', 'with', 'as', 'by', 'from', 'this', 'that', 'these', 'those',
-            'be', 'was', 'were', 'been', 'being', 'have', 'has', 'had', 'do', 'does',
-            'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'are',
-            'am', 'also', 'use', 'used', 'using', 'into', 'over', 'through', 'about'
-          ]);
-          
-          // 1. Extract ALL meaningful words from FULL text
-          const words = fullText
-            .toLowerCase()
-            .replace(/[^\w\s]/g, ' ')
-            .split(/\s+/)
-            .filter(w => w.length > 2 && !stopWords.has(w));
-          
-          // 2. Calculate word frequency
-          const wordFreq = new Map<string, number>();
-          words.forEach(w => wordFreq.set(w, (wordFreq.get(w) || 0) + 1));
-          
-          // 3. Scale extraction based on document size
-          // Small doc (<10k): freq 2-15, top 100
-          // Medium doc (10k-100k): freq 3-30, top 150  
-          // Large doc (>100k): freq 5-50, top 200
-          let minFreq = 2, maxFreq = 15, topCount = 100;
-          
-          if (docLength > 100000) {
-            minFreq = 5;
-            maxFreq = 50;
-            topCount = 200;
-          } else if (docLength > 10000) {
-            minFreq = 3;
-            maxFreq = 30;
-            topCount = 150;
-          }
-          
-          // Get important terms (scaled by frequency)
-          const importantTerms = Array.from(wordFreq.entries())
-            .filter(([_, freq]) => freq >= minFreq && freq <= maxFreq)
-            .sort(([_, a], [__, b]) => b - a)
-            .slice(0, topCount)
-            .map(([word]) => word);
-          
-          // 4. Get unique rare terms (long technical words)
-          const rareTerms = Array.from(wordFreq.entries())
-            .filter(([word, freq]) => freq >= 1 && freq <= 3 && word.length > 6)
-            .sort(([a], [b]) => b.length - a.length)
-            .slice(0, 80) // More rare terms for large docs
-            .map(([word]) => word);
-          
-          // 5. Extract key sentences from multiple sections
-          const sentences = fullText.split(/[.!?\n]+/).filter(s => s.trim().length > 30);
-          const keySentences: string[] = [];
-          
-          if (sentences.length > 0) {
-            // For large docs, sample more sections
-            const samplePoints = docLength > 50000 ? [0, 0.2, 0.4, 0.6, 0.8, 0.95] : [0, 0.33, 0.66, 0.95];
-            
-            samplePoints.forEach(point => {
-              const index = Math.floor(sentences.length * point);
-              if (sentences[index]) {
-                keySentences.push(sentences[index]);
-              }
-            });
-          }
-          
-          // Combine: Key sentences + Important terms + Rare terms
-          const combined = [...keySentences, importantTerms.join(' '), rareTerms.join(' ')].join(' ');
-          
-          // Scale embedding size based on document size
-          // Small (<10k): 1900 chars, Medium (10k-100k): 4000 chars, Large (>100k): 6000 chars
-          const targetSize = docLength > 100000 ? 6000 : docLength > 10000 ? 4000 : 1900;
-          
-          return combined.slice(0, targetSize);
-        }
-        
-        // Fast extraction from FULL text (no AI calls)
-        const keyContent = extractKeyContentFast(extractionResult.text);
-        const embeddingText = keyContent;
-        
-        const originalLength = extractionResult.text.length;
-        const uniqueTerms = new Set(extractionResult.text.toLowerCase().split(/\s+/).filter(w => w.length > 2)).size;
-        const compressionRatio = ((embeddingText.length / originalLength) * 100).toFixed(1);
-        
-        console.log(`📊 Extracted ${uniqueTerms} unique terms from ${originalLength} chars (${compressionRatio}% compression)`);
-        console.log(`Embedding from: ${embeddingText.length} chars of deduplicated key content`);
-        console.log(`📝 Key content preview: "${embeddingText.substring(0, 200)}"`);
-        
-        materialEmbedding = await generateEmbedding(embeddingText)
-        console.log(`✓ Embedding generated (${materialEmbedding.length} dimensions)`)
-      } catch (embError) {
-        console.error('Embedding generation failed (non-critical):', embError)
-        // Continue without embedding - semantic search won't work for this material
-      }
-      
-      console.log(`✓ Storing ${extractionResult.text.length} chars (full text, no truncation), ${extractionResult.chunks.length} chunks, ${extractionResult.parsedQuestions?.length || 0} structured questions${materialEmbedding ? ' with embedding' : ''}`)
+      console.log(
+        `Storing ${extractionResult.text.length} chars, ${extractionResult.chunks.length} extracted chunks, ` +
+        `${extractionResult.parsedQuestions?.length || 0} structured questions`
+      );
       
       // Update material with extracted content (both text and structured JSON)
       const updateData: any = {
         extracted_text: cleanText,
         structured_content: cleanStructuredContent,
         ocr_confidence: 100, // LangChain extraction is deterministic
-        processing_status: 'completed'
+        processing_status: 'processing'
       }
       
       // Update material (without embedding first)
@@ -671,33 +568,7 @@ export async function POST(request: NextRequest) {
 
       if (updateError) {
         console.error('Error updating material with OCR result:', updateError)
-        // Don't fail the request, material is still uploaded
-      }
-      
-      // Add embedding using RPC function (must cast string to vector type)
-      if (materialEmbedding) {
-        const embeddingVector = `[${materialEmbedding.join(',')}]`
-        console.log(`📦 Storing material-level embedding: ${embeddingVector.substring(0, 100)}... (${embeddingVector.length} chars)`)
-        
-        // Use RPC function with proper vector casting
-        const { data: rpcResult, error: embeddingError } = await supabaseAdmin
-          .rpc('update_material_embedding', {
-            material_id: material.id,
-            embedding_data: embeddingVector
-          })
-        
-        if (embeddingError) {
-          console.error('❌ RPC Error:', embeddingError)
-        } else if (rpcResult && rpcResult.length > 0) {
-          const result = rpcResult[0]
-          if (result.success) {
-            console.log(`✓ ${result.message}`)
-          } else {
-            console.error(`❌ RPC failed: ${result.message}`)
-          }
-        } else {
-          console.log(`✓ Material embedding RPC completed`)
-        }
+        throw new Error(`Could not save extracted document content: ${updateError.message}`)
       }
       
       // Store individual chunks with embeddings in document_chunks table
@@ -712,7 +583,6 @@ export async function POST(request: NextRequest) {
       }
       
       let chunksStored = 0;
-      let quotaExhausted = false;
       
       try {
         if (skipEmbeddings) {
@@ -735,6 +605,7 @@ export async function POST(request: NextRequest) {
           
           if (batchError) {
             console.error('❌ Batch insert failed:', batchError);
+            throw new Error(`Could not store syllabus topics: ${batchError.message}`);
           } else {
             chunksStored = chunks.length;
             console.log(`✓ Batch inserted ${chunksStored} syllabus topics`);
@@ -743,63 +614,68 @@ export async function POST(request: NextRequest) {
           // For notes/materials: Generate embeddings in parallel batches, then batch insert
           console.log(`🚀 Generating ${chunks.length} embeddings in parallel...`);
           const startTime = Date.now();
-          
-          try {
-            // Generate all embeddings in parallel batches
-            const chunkTexts = chunks.map(chunk => sanitizeChunkText(chunk.text));
-            const chunkEmbeddings = await generateEmbeddings(chunkTexts);
-            
-            const embeddingTime = ((Date.now() - startTime) / 1000).toFixed(1);
-            console.log(`✓ All embeddings generated in ${embeddingTime}s`);
-            
-            // Batch insert all chunks with their embeddings
-            const chunkRecords = chunks.map((chunk, i) => ({
-              user_id: effectiveUserId,
-              material_id: material.id,
-              chunk_index: chunk.index,
-              chunk_text: sanitizeChunkText(chunk.text),
-              embedding: chunkEmbeddings[i] ? `[${chunkEmbeddings[i].join(',')}]` : null,
-              start_char: chunk.start_char,
-              end_char: chunk.end_char,
-              char_count: chunk.char_count,
-              word_count: chunk.word_count
-            }));
-            
-            // Insert in batches of 20 to avoid payload limits
-            const insertBatchSize = 20;
-            for (let i = 0; i < chunkRecords.length; i += insertBatchSize) {
-              const batch = chunkRecords.slice(i, i + insertBatchSize);
-              const { error: insertError } = await supabaseAdmin
-                .from('document_chunks')
-                .insert(batch);
-              
-              if (insertError) {
-                console.error(`❌ Insert batch ${Math.floor(i/insertBatchSize)+1} failed:`, insertError);
-              } else {
-                chunksStored += batch.length;
-              }
-            }
-            
-            const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
-            console.log(`✓ Successfully stored ${chunksStored}/${chunks.length} chunks in ${totalTime}s`);
-            
-          } catch (embError: any) {
-            console.error('❌ Batch embedding generation failed:', embError);
-            
-            // Check if quota exhausted
-            if (embError?.message?.includes('429') || embError?.message?.includes('RESOURCE_EXHAUSTED')) {
-              quotaExhausted = true;
-              console.log('⚠️ Quota exhausted during batch embedding generation');
-            }
+          if (chunks.length === 0) {
+            throw new Error('No document chunks were produced for embedding.');
           }
+
+          const chunkTexts = chunks.map(chunk => sanitizeChunkText(chunk.text));
+          const chunkEmbeddings = await generateEmbeddings(chunkTexts);
+          if (
+            chunkEmbeddings.length !== chunks.length ||
+            chunkEmbeddings.some(embedding => embedding.length !== 768)
+          ) {
+            throw new Error('Chunk embedding generation returned incomplete or invalid vectors.');
+          }
+
+          const embeddingTime = ((Date.now() - startTime) / 1000).toFixed(1);
+          console.log(`✓ All embeddings generated in ${embeddingTime}s`);
+
+          const chunkRecords = chunks.map((chunk, i) => ({
+            user_id: effectiveUserId,
+            material_id: material.id,
+            chunk_index: chunk.index,
+            chunk_text: sanitizeChunkText(chunk.text),
+            embedding: `[${chunkEmbeddings[i].join(',')}]`,
+            start_char: chunk.start_char,
+            end_char: chunk.end_char,
+            char_count: chunk.char_count,
+            word_count: chunk.word_count
+          }));
+
+          const insertBatchSize = 20;
+          for (let i = 0; i < chunkRecords.length; i += insertBatchSize) {
+            const batch = chunkRecords.slice(i, i + insertBatchSize);
+            const { error: insertError } = await supabaseAdmin
+              .from('document_chunks')
+              .insert(batch);
+
+            if (insertError) {
+              console.error(`❌ Insert batch ${Math.floor(i / insertBatchSize) + 1} failed:`, insertError);
+              throw new Error(`Could not store document chunks: ${insertError.message}`);
+            }
+
+            chunksStored += batch.length;
+          }
+
+          const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+          console.log(`✓ Successfully stored ${chunksStored}/${chunks.length} chunks in ${totalTime}s`);
         }
-        
-        if (quotaExhausted) {
-          console.log(`⚠️ Successfully stored ${chunksStored}/${chunks.length} chunks before quota exhaustion`);
+
+        if (chunksStored !== chunks.length) {
+          throw new Error(`Only ${chunksStored} of ${chunks.length} document chunks were stored.`);
         }
       } catch (chunkError) {
         console.error('❌ Error storing chunks:', chunkError);
-        // Non-critical: continue even if chunk storage fails
+        throw chunkError;
+      }
+
+      const { error: completionError } = await supabaseAdmin
+        .from('study_materials')
+        .update({ processing_status: 'completed' })
+        .eq('id', material.id)
+
+      if (completionError) {
+        throw new Error(`Could not mark document processing complete: ${completionError.message}`);
       }
 
       // Update user_progress - increment material uploads for this topic
@@ -850,7 +726,7 @@ export async function POST(request: NextRequest) {
 
       return NextResponse.json({
         success: true,
-        embeddingGenerated: materialEmbedding !== null,
+        embeddingGenerated: materialType !== 'syllabus' && chunksStored > 0,
         isSyllabus: materialType === 'syllabus',
         syllabusTopics: materialType === 'syllabus' ? syllabusTopics : undefined,
         material: {
@@ -889,9 +765,20 @@ export async function POST(request: NextRequest) {
       const errorMessage = isScannedPDFError
         ? 'This PDF appears to contain scanned images. Please upload a PDF with selectable text, or try converting your scanned PDF to text using an OCR tool first.'
         : ocrError instanceof Error ? ocrError.message : 'Unknown extraction error';
+
+      const isChunkProcessingError = /embedding|chunk|document processing complete/i.test(errorMessage);
+
+      const { error: chunkCleanupError } = await supabaseAdmin
+        .from('document_chunks')
+        .delete()
+        .eq('material_id', materialId)
+
+      if (chunkCleanupError) {
+        console.error('Failed to clean up incomplete document chunks:', chunkCleanupError);
+      }
       
       // Update status to failed
-      await supabaseAdmin
+      const { error: statusUpdateError } = await supabaseAdmin
         .from('study_materials')
         .update({ 
           processing_status: 'failed',
@@ -899,9 +786,13 @@ export async function POST(request: NextRequest) {
         })
         .eq('id', materialId)
 
+      if (statusUpdateError) {
+        console.error('Failed to mark material processing as failed:', statusUpdateError);
+      }
+
       return NextResponse.json({
         success: false,
-        error: 'Text extraction failed',
+        error: isChunkProcessingError ? 'Document processing failed' : 'Text extraction failed',
         details: errorMessage,
         isScannedPDF: isScannedPDFError,
         material: {
@@ -912,7 +803,7 @@ export async function POST(request: NextRequest) {
         suggestion: isScannedPDFError 
           ? 'Try using a PDF with selectable text, or convert your scanned document using an online OCR tool like https://www.onlineocr.net/ or Adobe Acrobat.'
           : 'Please try a different file format or check if the PDF is corrupted.'
-      }, { status: 400 })
+      }, { status: isChunkProcessingError ? 500 : 400 })
     }
 
   } catch (error: any) {

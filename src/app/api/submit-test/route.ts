@@ -20,7 +20,13 @@ export async function POST(request: NextRequest) {
     const { testId, answers, timeTaken } = body
 
     // Validate required fields - answers can be empty object if all questions skipped
-    if (!testId || answers === undefined || answers === null || typeof timeTaken !== 'number') {
+    if (
+      !testId ||
+      answers === undefined ||
+      answers === null ||
+      !Number.isInteger(timeTaken) ||
+      timeTaken < 0
+    ) {
       return NextResponse.json(
         { error: 'Test ID, answers, and time taken are required' },
         { status: 400 }
@@ -101,16 +107,23 @@ export async function POST(request: NextRequest) {
         score: result.score,
         total_questions: result.totalQuestions,
         correct_answers: correctCount,
-        time_spent: timeTaken,
-        answers: validAnswers
+        incorrect_answers: Math.max(0, result.totalQuestions - correctCount),
+        unattempted_answers: Math.max(0, result.totalQuestions - Object.keys(validAnswers).length),
+        time_taken: timeTaken,
+        user_answers: validAnswers
       })
       .select()
       .single()
 
     if (resultError) {
-      console.error('Error saving result:', resultError)
+      console.error('Error saving result:', {
+        code: resultError.code,
+        message: resultError.message,
+        details: resultError.details,
+        hint: resultError.hint
+      })
       return NextResponse.json(
-        { error: 'Failed to save test result' },
+        { error: 'Failed to save test result; the test was not marked completed.' },
         { status: 500 }
       )
     }
@@ -125,6 +138,24 @@ export async function POST(request: NextRequest) {
     if (statusUpdateError) {
       console.error('Error updating test status:', statusUpdateError)
       // Don't fail the request, result was saved successfully
+    }
+
+    // Update total points for user
+    if (result.score > 0) {
+      try {
+        const { data: userData } = await supabase
+          .from('users')
+          .select('total_points')
+          .eq('id', user.id)
+          .single();
+        const currentPoints = userData?.total_points || 0;
+        await supabase
+          .from('users')
+          .update({ total_points: currentPoints + Math.round(result.score) })
+          .eq('id', user.id);
+      } catch (err) {
+        console.error('Error updating user points:', err);
+      }
     }
 
     // Prepare detailed response

@@ -239,11 +239,12 @@ export default function TakeTestPage() {
         .insert({
           test_id: testId,
           user_id: user.id,
-          answers: JSON.stringify(answers),
+          user_answers: answers,
           score: percentage,
           total_questions: test.questions.length,
           correct_answers: correctAnswers,
-          time_spent: totalTimeSpent,
+          incorrect_answers: test.questions.length - correctAnswers,
+          time_taken: totalTimeSpent,
           completed_at: endTime.toISOString()
         });
 
@@ -251,6 +252,13 @@ export default function TakeTestPage() {
         console.error('Error saving test result:', resultError);
         toast.error('Error saving test result');
       } else {
+        // Also update test status in mock_tests
+        await supabase
+          .from('mock_tests')
+          .update({ status: 'completed' })
+          .eq('id', testId)
+          .eq('user_id', user.id);
+
         toast.success('Test submitted successfully!');
         setIsSubmitted(true);
         setShowResults(true);

@@ -89,6 +89,12 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    -- Search every IVFFlat list for material-scoped retrieval. This avoids
+    -- false empty results when an individual PDF has fewer rows than index lists.
+    IF filter_material_id IS NOT NULL THEN
+        PERFORM set_config('ivfflat.probes', '100', true);
+    END IF;
+
     RETURN QUERY
     SELECT
         dc.id AS chunk_id,

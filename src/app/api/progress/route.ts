@@ -38,17 +38,13 @@ export async function GET(request: NextRequest) {
     const { data: progressData, error: progressError } = await query;
 
     if (progressError) {
-      console.error('Error fetching progress:', progressError);
-      return NextResponse.json(
-        { error: 'Failed to fetch progress data' },
-        { status: 500 }
-      );
+      console.error('Warning: could not fetch user_progress directly:', progressError);
     }
 
-    // Get overall statistics
+    // Get overall statistics with mock_tests join
     const { data: resultsData, error: resultsError } = await supabase
       .from('test_results')
-      .select('score, total_questions, correct_answers, time_taken, completed_at, test_id')
+      .select('id, score, total_questions, correct_answers, incorrect_answers, unattempted_answers, time_taken, completed_at, test_id, mock_tests(title, topic, exam_type)')
       .eq('user_id', user.id)
       .order('completed_at', { ascending: false })
       .limit(100);
@@ -62,50 +58,133 @@ export async function GET(request: NextRequest) {
     const averageScore = totalTests > 0
       ? resultsData!.reduce((sum: number, r: any) => sum + Number(r.score), 0) / totalTests
       : 0;
-    const totalTimeSpent = resultsData?.reduce((sum: number, r: any) => sum + r.time_taken, 0) || 0;
-    const averageAccuracy = totalTests > 0
-      ? (resultsData!.reduce((sum: number, r: any) => sum + (r.correct_answers / r.total_questions * 100), 0) / totalTests)
+    const totalTimeSpent = resultsData?.reduce((sum: number, r: any) => sum + (r.time_taken || 0), 0) || 0;
+    const totalQuestions = resultsData?.reduce((sum: number, r: any) => sum + (r.total_questions || 0), 0) || 0;
+    const totalCorrect = resultsData?.reduce((sum: number, r: any) => sum + (r.correct_answers || 0), 0) || 0;
+    const averageAccuracy = totalQuestions > 0
+      ? (totalCorrect / totalQuestions) * 100
+      : (totalTests > 0 ? averageScore : 0);
+    const bestScore = totalTests > 0 
+      ? Math.max(...resultsData!.map((r: any) => Number(r.score) || 0)) 
       : 0;
 
-    // Get recent performance (last 10 tests)
-    const recentPerformance = resultsData?.slice(0, 10).map((r: any) => ({
-      date: r.completed_at,
-      score: Number(r.score),
-      test_id: r.test_id
-    })) || [];
+    // Get topic-wise performance from user_progress or directly from resultsData
+    let topicWisePerformance: any[] = [];
+    if (progressData && progressData.length > 0 && progressData.some(p => p.topic && p.topic !== 'General')) {
+      topicWisePerformance = progressData.map((p: any) => ({
+        topic: p.topic,
+        tests_attempted: p.tests_attempted || 1,
+        average_score: Math.round(Number(p.average_score)),
+        accuracy: Math.round(Number(p.accuracy_rate) || Number(p.average_score)),
+        highest_score: Math.round(Number(p.highest_score))
+      }));
+    } else if (resultsData && resultsData.length > 0) {
+      const topicMap: Record<string, { totalScore: number; count: number; totalQs: number; correctQs: number; highest: number }> = {};
+      
+      resultsData.forEach((r: any) => {
+        const mockTest = Array.isArray(r.mock_tests) ? r.mock_tests[0] : r.mock_tests;
+        let topic = mockTest?.topic?.trim();
+        if (!topic || topic === 'General') {
+          topic = mockTest?.title?.split('-')[0]?.trim() || 'General';
+        }
+        if (!topicMap[topic]) {
+          topicMap[topic] = { totalScore: 0, count: 0, totalQs: 0, correctQs: 0, highest: 0 };
+        }
+        const s = Number(r.score) || 0;
+        topicMap[topic].totalScore += s;
+        topicMap[topic].count += 1;
+        topicMap[topic].totalQs += r.total_questions || 0;
+        topicMap[topic].correctQs += r.correct_answers || 0;
+        topicMap[topic].highest = Math.max(topicMap[topic].highest, s);
+      });
 
-    // Calculate improvement trend (group by week)
-    const improvementTrend = calculateImprovementTrend(resultsData || []);
-
-    // Get topic-wise performance
-    const topicWisePerformance = progressData?.map((p: any) => ({
-      topic: p.topic,
-      tests_attempted: p.tests_attempted,
-      average_score: Number(p.average_score),
-      accuracy: Number(p.accuracy_rate),
-      highest_score: Number(p.highest_score)
-    })) || [];
+      topicWisePerformance = Object.entries(topicMap).map(([topic, stats]) => ({
+        topic,
+        tests_attempted: stats.count,
+        average_score: Math.round(stats.totalScore / stats.count),
+        accuracy: stats.totalQs > 0 ? Math.round((stats.correctQs / stats.totalQs) * 100) : Math.round(stats.totalScore / stats.count),
+        highest_score: stats.highest
+      }));
+    }
 
     // Determine strength and weakness
     const sortedByScore = [...topicWisePerformance].sort((a, b) => b.average_score - a.average_score);
-    const strongTopics = sortedByScore.slice(0, 3).map(t => t.topic);
-    const weakTopics = sortedByScore.slice(-3).reverse().map(t => t.topic);
+    const strongTopics = sortedByScore.filter(t => t.average_score >= 60).slice(0, 3).map(t => t.topic);
+    const weakTopics = sortedByScore.filter(t => t.average_score < 60).slice(-3).reverse().map(t => t.topic);
+
+    // Topic distribution for pie chart
+    const topicColors = ['#8b5cf6', '#6366f1', '#3b82f6', '#06b6d4', '#10b981', '#f59e0b', '#ec4899'];
+    const totalTopicTests = topicWisePerformance.reduce((sum, t) => sum + t.tests_attempted, 0) || 1;
+    const topicDistribution = topicWisePerformance.map((t, idx) => ({
+      name: t.topic,
+      value: Math.round((t.tests_attempted / totalTopicTests) * 100),
+      count: t.tests_attempted,
+      color: topicColors[idx % topicColors.length]
+    }));
+
+    // Chronological performance trend (for line chart)
+    const chronologicalResults = [...(resultsData || [])].sort((a, b) => 
+      new Date(a.completed_at).getTime() - new Date(b.completed_at).getTime()
+    );
+
+    const performanceTrend = chronologicalResults.map((r: any, idx: number) => {
+      const mockTest = Array.isArray(r.mock_tests) ? r.mock_tests[0] : r.mock_tests;
+      const accuracy = r.total_questions > 0 
+        ? Math.round((r.correct_answers / r.total_questions) * 100) 
+        : Math.round(Number(r.score));
+      return {
+        test: `Test ${idx + 1}`,
+        title: mockTest?.title || `Test ${idx + 1}`,
+        date: new Date(r.completed_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        score: Math.round(Number(r.score)),
+        accuracy: accuracy,
+        time_taken: r.time_taken,
+        total_questions: r.total_questions,
+        correct_answers: r.correct_answers
+      };
+    });
+
+    // Recent tests list (descending)
+    const recentTests = (resultsData || []).slice(0, 10).map((r: any) => {
+      const mockTest = Array.isArray(r.mock_tests) ? r.mock_tests[0] : r.mock_tests;
+      let topic = mockTest?.topic?.trim();
+      if (!topic || topic === 'General') {
+        topic = mockTest?.title?.split('-')[0]?.trim() || 'General';
+      }
+      return {
+        id: r.id,
+        test_id: r.test_id,
+        title: mockTest?.title || 'Mock Test',
+        topic,
+        score: Math.round(Number(r.score)),
+        accuracy: r.total_questions > 0 ? Math.round((r.correct_answers / r.total_questions) * 100) : Math.round(Number(r.score)),
+        total_questions: r.total_questions,
+        correct_answers: r.correct_answers,
+        time_taken: r.time_taken,
+        completed_at: r.completed_at
+      };
+    });
 
     const analytics = {
       overall_progress: {
         total_tests: totalTests,
-        average_score: Number(averageScore.toFixed(2)),
+        average_score: Math.round(averageScore),
+        best_score: Math.round(bestScore),
         total_time_spent: totalTimeSpent,
-        accuracy: Number(averageAccuracy.toFixed(2))
+        total_questions: totalQuestions,
+        total_correct: totalCorrect,
+        accuracy: Math.round(averageAccuracy)
       },
       topic_wise_performance: topicWisePerformance,
       strength_weakness: {
         strong_topics: strongTopics,
         weak_topics: weakTopics
       },
-      recent_performance: recentPerformance,
-      improvement_trend: improvementTrend,
-      raw_progress: progressData
+      topic_distribution: topicDistribution,
+      performance_trend: performanceTrend,
+      recent_tests: recentTests,
+      improvement_trend: calculateImprovementTrend(resultsData || []),
+      raw_progress: progressData || []
     };
 
     return NextResponse.json({ success: true, data: analytics });

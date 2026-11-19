@@ -23,7 +23,7 @@ This document provides a comprehensive analysis of Mockify.AI's current infrastr
 
 ---
 
-## 🔧 Current Technology Stack & Services
+## 🔧 Current Technology Stack & Services 
 
 ### 1. **Supabase** (PostgreSQL + Auth + Storage + Realtime)
 

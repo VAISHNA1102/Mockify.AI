@@ -36,6 +36,10 @@ const nextConfig: NextConfig = {
   
   // Experimental features for performance
   experimental: {
+    proxyClientMaxBodySize: '100mb',
+    serverActions: {
+      bodySizeLimit: '100mb',
+    },
     // Enable optimized package imports
     optimizePackageImports: [
       'lucide-react',
