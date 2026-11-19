@@ -468,10 +468,10 @@ export function Dashboard() {
 
       // 2. Fetch recently generated mock tests
       const { data: recentTests } = await supabase
-        .from('mock_tests')
+        .from('mock_tests') 
         .select('id, title, created_at')
         .eq('user_id', currentUserId)
-        .order('created_at', { ascending: false })
+        .order('created_at', { ascending: false })    
         .limit(5);
 
       if (recentTests && recentTests.length > 0) {

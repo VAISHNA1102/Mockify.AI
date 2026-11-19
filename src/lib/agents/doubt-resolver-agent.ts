@@ -5,18 +5,14 @@
  */
 
 import { GoogleGenAI } from '@google/genai';
-import { createClient } from '@supabase/supabase-js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY!
 });
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
-
 interface DoubtRequest {
+  supabase: SupabaseClient;
   questionText: string;
   options: string[];
   correctAnswer: string;
@@ -37,6 +33,7 @@ interface MaterialContext {
  * Simplified version - gets recent materials without embeddings
  */
 async function retrieveRelevantMaterials(
+  supabase: SupabaseClient,
   userId: string,
   questionText: string,
   topic?: string
@@ -199,6 +196,7 @@ export async function resolveDoubt(request: DoubtRequest): Promise<{
   try {
     // Step 1: Retrieve relevant study materials
     const materials = await retrieveRelevantMaterials(
+      request.supabase,
       request.userId,
       `${request.questionText} ${request.topic || ''}`,
       request.topic
@@ -227,6 +225,7 @@ export async function resolveDoubt(request: DoubtRequest): Promise<{
  * Save doubt interaction for analytics
  */
 export async function saveDoubtInteraction(
+  supabase: SupabaseClient,
   userId: string,
   questionText: string,
   doubtText: string,

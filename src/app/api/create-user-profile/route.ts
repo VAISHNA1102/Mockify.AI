@@ -1,120 +1,95 @@
-import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
+import { createServerSupabaseClient } from '@/lib/supabase-server'
 
-// This endpoint uses service role to bypass RLS and create user profiles
-// Only called immediately after successful auth signup
 export async function POST(request: NextRequest) {
   try {
-    console.log('[create-user-profile] API called');
-    
-    const { userId, email, name } = await request.json()
-    console.log('[create-user-profile] Request data:', { userId, email, name });
+    const supabase = await createServerSupabaseClient()
+    const { data: { user }, error: authError } = await supabase.auth.getUser()
 
-    if (!userId || !email || !name) {
-      console.error('[create-user-profile] Missing required fields');
+    if (authError || !user) {
+      return NextResponse.json(
+        { success: false, error: 'Authentication required' },
+        { status: 401 }
+      )
+    }
+
+    const body: unknown = await request.json()
+    if (
+      typeof body !== 'object' ||
+      body === null ||
+      !('userId' in body) ||
+      !('email' in body) ||
+      !('name' in body) ||
+      typeof body.userId !== 'string' ||
+      typeof body.email !== 'string' ||
+      typeof body.name !== 'string' ||
+      !body.userId ||
+      !body.email ||
+      !body.name
+    ) {
       return NextResponse.json(
         { success: false, error: 'Missing required fields: userId, email, name' },
         { status: 400 }
       )
     }
 
-    // Check if service role key is configured
-    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      console.error('[create-user-profile] SUPABASE_SERVICE_ROLE_KEY not configured');
+    if (
+      body.userId !== user.id ||
+      body.email.toLowerCase() !== (user.email || '').toLowerCase()
+    ) {
       return NextResponse.json(
-        { success: false, error: 'Server configuration error: Service role key not found' },
+        { success: false, error: 'Forbidden' },
+        { status: 403 }
+      )
+    }
+
+    const name = user.user_metadata?.full_name ||
+      user.user_metadata?.name ||
+      user.email?.split('@')[0] ||
+      'User'
+
+    // Check if user profile already exists
+    const { data: existingUser, error: checkError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', user.id)
+      .maybeSingle()
+
+    if (checkError) {
+      console.error('[create-user-profile] Error checking existing user:', checkError)
+      return NextResponse.json(
+        { success: false, error: 'Failed to check user profile' },
         { status: 500 }
       )
     }
 
-    // Create a Supabase client with service role key to bypass RLS
-    const supabaseAdmin = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!, // Service role key bypasses RLS
-      {
-        auth: {
-          autoRefreshToken: false,
-          persistSession: false
-        }
-      }
-    )
-    
-    console.log('[create-user-profile] Supabase admin client created');
-
-    // Check if the auth user actually exists
-    // This handles the case where email confirmation is enabled
-    console.log('[create-user-profile] Checking if auth user exists...');
-    const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.getUserById(userId)
-    
-    if (authError || !authUser?.user) {
-      console.error('[create-user-profile] Auth user not found:', authError?.message);
-      console.log('[create-user-profile] This usually means email confirmation is required');
-      return NextResponse.json(
-        { 
-          success: false, 
-          error: 'User pending email confirmation',
-          requiresEmailConfirmation: true
-        },
-        { status: 202 } // 202 Accepted - processing will complete later
-      )
-    }
-
-    console.log('[create-user-profile] Auth user verified:', email);
-
-    // Check if user profile already exists
-    const { data: existingUser, error: checkError } = await supabaseAdmin
-      .from('users')
-      .select('id')
-      .eq('id', userId)
-      .single()
-
-    if (checkError && checkError.code !== 'PGRST116') {
-      console.error('[create-user-profile] Error checking existing user:', checkError);
-    }
-
     if (existingUser) {
-      console.log('[create-user-profile] User profile already exists:', email)
       return NextResponse.json({ 
         success: true, 
         message: 'User profile already exists' 
       })
     }
 
-    console.log('[create-user-profile] Creating new user profile...');
-
-    // Create user profile with service role (bypasses RLS)
-    const { error: insertError } = await supabaseAdmin
+    const { error: insertError } = await supabase
       .from('users')
       .insert({
-        id: userId,
-        email: email,
+        id: user.id,
+        email: user.email || '',
         name: name,
         created_at: new Date().toISOString(),
       })
 
     if (insertError) {
       console.error('[create-user-profile] Error creating user profile:', insertError)
-      console.error('[create-user-profile] Error code:', insertError.code);
-      console.error('[create-user-profile] Error message:', insertError.message);
-      console.error('[create-user-profile] Error details:', insertError.details);
-      console.error('[create-user-profile] Error hint:', insertError.hint);
-      
       return NextResponse.json(
         { 
           success: false,
-          error: 'Failed to create user profile', 
-          details: {
-            code: insertError.code,
-            message: insertError.message,
-            details: insertError.details,
-            hint: insertError.hint
-          }
+          error: 'Failed to create user profile'
         },
         { status: 500 }
       )
     }
 
-    console.log('[create-user-profile] User profile created successfully:', email)
     return NextResponse.json({ 
       success: true, 
       message: 'User profile created successfully' 
@@ -122,12 +97,10 @@ export async function POST(request: NextRequest) {
 
   } catch (error) {
     console.error('[create-user-profile] Unexpected error:', error)
-    console.error('[create-user-profile] Error stack:', error instanceof Error ? error.stack : 'No stack trace');
     return NextResponse.json(
       { 
         success: false,
-        error: 'Internal server error', 
-        details: error instanceof Error ? error.message : String(error)
+        error: 'Internal server error'
       },
       { status: 500 }
     )

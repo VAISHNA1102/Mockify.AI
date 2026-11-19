@@ -73,29 +73,23 @@ export async function GET(request: NextRequest) {
 
         try {
           // Create user profile synchronously to ensure it exists before redirect
-          const response = await fetch(`${requestUrl.origin}/api/create-user-profile`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              userId: data.user.id,
+          const { error: createProfileError } = await supabase
+            .from('users')
+            .insert({
+              id: data.user.id,
               email: data.user.email!,
               name: userName,
-            }),
-          });
+            });
 
-          const result = await response.json();
-
-          if (!response.ok || !result.success) {
-            console.error('Error creating user profile:', result);
+          if (createProfileError) {
+            console.error('Error creating user profile:', createProfileError);
             // Redirect to signup with error
             return NextResponse.redirect(
               `${requestUrl.origin}/signup?error=${encodeURIComponent('Failed to create profile. Please try again.')}`
             )
           }
 
-          console.log('User profile created:', result.message);
+          console.log('User profile created:', data.user.id);
           shouldRedirectToOnboarding = true;
         } catch (error) {
           console.error('Failed to create profile:', error);

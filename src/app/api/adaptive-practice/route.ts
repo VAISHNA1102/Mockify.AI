@@ -4,7 +4,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { createServerSupabaseClient } from '@/lib/supabase-server';
 import {
   analyzeWeakTopics,
   createAdaptivePracticeSet,
@@ -13,28 +13,43 @@ import {
   AdaptiveQuestion
 } from '@/lib/agents/adaptive-question-agent';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+async function getAuthenticatedContext() {
+  const supabase = await createServerSupabaseClient();
+  const { data: { user }, error } = await supabase.auth.getUser();
+
+  if (error || !user) {
+    return null;
+  }
+
+  return { supabase, user };
+}
 
 /**
  * GET: Analyze and return user's weak topics
  */
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const userId = searchParams.get('userId');
+    const context = await getAuthenticatedContext();
+    if (!context) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+    }
 
-    if (!userId) {
+    const { searchParams } = new URL(request.url);
+    const requestedUserId = searchParams.get('userId');
+
+    if (!requestedUserId) {
       return NextResponse.json(
         { error: 'userId is required' },
         { status: 400 }
       );
     }
 
+    if (requestedUserId !== context.user.id) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     // Analyze weak topics
-    const weakTopics = await analyzeWeakTopics(userId);
+    const weakTopics = await analyzeWeakTopics(context.supabase, context.user.id);
 
     if (weakTopics.length === 0) {
       return NextResponse.json({
@@ -77,6 +92,11 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
+    const context = await getAuthenticatedContext();
+    if (!context) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+    }
+
     const body = await request.json();
     const { 
       userId, 
@@ -92,9 +112,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (userId !== context.user.id) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     // Generate adaptive practice set
     const practiceSet = await createAdaptivePracticeSet(
-      userId,
+      context.supabase,
+      context.user.id,
       questionCount,
       examType
     );
@@ -132,6 +157,11 @@ export async function POST(request: NextRequest) {
  */
 export async function PATCH(request: NextRequest) {
   try {
+    const context = await getAuthenticatedContext();
+    if (!context) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+    }
+
     const body = await request.json();
     const { 
       userId, 
@@ -152,9 +182,14 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
+    if (userId !== context.user.id) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     // Save practice session and get results
     const result = await savePracticeSession(
-      userId,
+      context.supabase,
+      context.user.id,
       questions,
       answers,
       weakTopics || []

@@ -13,8 +13,8 @@ import { createServerClient } from '@supabase/ssr';
 // Public routes that don't require authentication
 const publicRoutes = ['/', '/login', '/signup', '/api/health', '/auth/callback'];
 
-// API routes that need rate limiting
-const apiRoutes = ['/api/generate-questions', '/api/upload'];
+// Only explicitly public API routes may use shared caching.
+const publicCacheableApiRoutes = new Set(['/api/health']);
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -111,11 +111,13 @@ function addPerformanceHeaders(
     );
   }
   
-  // Cache API responses with short TTL
+  // User-specific API responses must not be stored by shared caches.
   if (pathname.startsWith('/api/')) {
     response.headers.set(
       'Cache-Control',
-      'public, max-age=60, stale-while-revalidate=120'
+      publicCacheableApiRoutes.has(pathname)
+        ? 'public, max-age=60, stale-while-revalidate=120'
+        : 'private, no-store, max-age=0'
     );
   }
 

@@ -31,13 +31,14 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
 
 // Ensure user exists in public.users table (required for foreign key constraints)
 export async function ensureUserRecord(authUser: AuthUser): Promise<boolean> {
-  const { createClient: createServiceClient } = await import('@supabase/supabase-js');
-  const supabase = createServiceClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
+  const supabase = createClient();
 
   try {
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user || user.id !== authUser.id) {
+      return false;
+    }
+
     // Check if user exists in public.users
     const { data: existingUser, error: fetchError } = await supabase
       .from('users')
@@ -50,9 +51,12 @@ export async function ensureUserRecord(authUser: AuthUser): Promise<boolean> {
       const { error: insertError } = await supabase
         .from('users')
         .insert({
-          id: authUser.id,
-          name: authUser.name,
-          email: authUser.email,
+          id: user.id,
+          name: user.user_metadata?.full_name ||
+            user.user_metadata?.name ||
+            user.email?.split('@')[0] ||
+            'User',
+          email: user.email || '',
           exam_type: null,
           language: 'English',
           created_at: new Date().toISOString()

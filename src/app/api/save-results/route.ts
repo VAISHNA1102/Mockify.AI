@@ -1,19 +1,23 @@
 /**
  * Save Test Results API Route
  * Saves test results for adaptive practice analysis
- * Uses service role to bypass RLS
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+import { createServerSupabaseClient } from '@/lib/supabase-server';
 
 export async function POST(request: NextRequest) {
   try {
+    const supabase = await createServerSupabaseClient();
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+    if (authError || !user) {
+      return NextResponse.json(
+        { error: 'Authentication required' },
+        { status: 401 }
+      );
+    }
+
     const body = await request.json();
     const { 
       userId, 
@@ -31,12 +35,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (userId !== user.id) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     // Check if practice_sessions table exists, use it instead of results
     // practice_sessions doesn't require test_id
     const { data, error } = await supabase
       .from('practice_sessions')
       .insert({
-        user_id: userId,
+        user_id: user.id,
         weak_topics: analytics.weaknesses || [],
         questions_count: totalQuestions || 0,
         score: score || 0,

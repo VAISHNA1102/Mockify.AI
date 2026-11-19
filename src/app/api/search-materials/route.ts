@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { generateEmbedding } from '@/lib/huggingface-embeddings';
+import { createServerSupabaseClient } from '@/lib/supabase-server';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -221,9 +222,10 @@ export async function POST(request: NextRequest) {
 // GET endpoint for checking if semantic search is available
 export async function GET(request: NextRequest) {
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const sessionClient = await createServerSupabaseClient();
+    const { data: { user }, error: authError } = await sessionClient.auth.getUser();
 
-    if (!user) {
+    if (authError || !user) {
       return NextResponse.json(
         { error: 'Unauthorized' }, 
         { status: 401 }
@@ -231,7 +233,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Search uses chunk-level vectors, so report availability from that table.
-    const { data: chunks, error } = await supabase
+    const { data: chunks, error } = await sessionClient
       .from('document_chunks')
       .select('material_id')
       .eq('user_id', user.id)

@@ -5,16 +5,11 @@
  */
 
 import { GoogleGenAI } from '@google/genai';
-import { createClient } from '@supabase/supabase-js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY!
 });
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
 
 // Types
 export interface TopicPerformance {
@@ -53,7 +48,10 @@ export interface PracticeSession {
 /**
  * Analyze user's test history to find weak topics
  */
-export async function analyzeWeakTopics(userId: string): Promise<WeakTopic[]> {
+export async function analyzeWeakTopics(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<WeakTopic[]> {
   try {
     // Fetch user's recent practice sessions (saved test results)
     const { data: sessions, error } = await supabase
@@ -150,6 +148,7 @@ export async function analyzeWeakTopics(userId: string): Promise<WeakTopic[]> {
  * Get relevant content from user's study materials for a topic
  */
 async function getTopicContent(
+  supabase: SupabaseClient,
   userId: string,
   topic: string
 ): Promise<string> {
@@ -183,6 +182,7 @@ async function getTopicContent(
  * Generate adaptive practice questions for weak topics
  */
 export async function generateAdaptiveQuestions(
+  supabase: SupabaseClient,
   userId: string,
   weakTopics: WeakTopic[],
   questionCount: number = 5,
@@ -198,7 +198,7 @@ export async function generateAdaptiveQuestions(
     }
 
     // Get study material content for context
-    const materialContent = await getTopicContent(userId, targetTopics[0].topic);
+    const materialContent = await getTopicContent(supabase, userId, targetTopics[0].topic);
 
     // Build the prompt
     const topicsInfo = targetTopics.map(t => 
@@ -299,6 +299,7 @@ Generate exactly ${questionCount} questions. Return ONLY the JSON array, no othe
  * Save practice session results
  */
 export async function savePracticeSession(
+  supabase: SupabaseClient,
   userId: string,
   questions: AdaptiveQuestion[],
   answers: Record<number, string>,
@@ -335,7 +336,7 @@ export async function savePracticeSession(
     });
 
     // Save to database
-    await supabase.from('practice_sessions').insert({
+    const { error } = await supabase.from('practice_sessions').insert({
       user_id: userId,
       weak_topics: weakTopics,
       questions_count: questions.length,
@@ -344,10 +345,14 @@ export async function savePracticeSession(
       created_at: new Date().toISOString()
     });
 
+    if (error) {
+      throw error;
+    }
+
     return { score, improvement };
   } catch (error) {
     console.error('Error saving practice session:', error);
-    return { score: 0, improvement: {} };
+    throw error;
   }
 }
 
@@ -355,13 +360,14 @@ export async function savePracticeSession(
  * Main function: Generate personalized practice set
  */
 export async function createAdaptivePracticeSet(
+  supabase: SupabaseClient,
   userId: string,
   questionCount: number = 5,
   examType: string = 'NEET'
 ): Promise<PracticeSession | null> {
   try {
     // Step 1: Analyze weak topics
-    const weakTopics = await analyzeWeakTopics(userId);
+    const weakTopics = await analyzeWeakTopics(supabase, userId);
 
     if (weakTopics.length === 0) {
       console.log('No weak topics found - student is performing well!');
@@ -372,6 +378,7 @@ export async function createAdaptivePracticeSet(
 
     // Step 2: Generate adaptive questions
     const questions = await generateAdaptiveQuestions(
+      supabase,
       userId,
       weakTopics,
       questionCount,

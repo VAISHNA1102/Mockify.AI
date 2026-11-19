@@ -74,6 +74,7 @@ export async function POST(request: NextRequest) {
 
     // Call doubt resolver agent
     const result = await resolveDoubt({
+      supabase,
       questionText: body.questionText,
       options: body.options,
       correctAnswer: body.correctAnswer,
@@ -85,6 +86,7 @@ export async function POST(request: NextRequest) {
 
     // Save interaction asynchronously (don't wait)
     saveDoubtInteraction(
+      supabase,
       user.id,
       body.questionText,
       body.doubtText
